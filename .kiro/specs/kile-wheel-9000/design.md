@@ -49,14 +49,17 @@ goes where and what is selected. No OS calls, so it is testable without a deskto
 
 ### kile-wheel-platform
 
-Every `windows-rs` call lives here, grouped by what it talks to rather than by which
-header it came from.
+OS services, grouped by what they talk to rather than by which header they came from.
+The overlay's own window and renderer are not here, because they belong with the wheel
+they draw; everything else that touches `windows-rs` is.
 
 - `instance`: named mutex single-instance guard
 - `hooks`: `WH_KEYBOARD_LL` / `WH_MOUSE_LL` on an owned thread with its own message loop
-- `watcher`: `SetWinEventHook` subscriptions and the window model they feed
-- `windows_model`: taskbar visibility predicate, AppUserModelID / exe-path grouping
-- `activate`: foreground, restore, minimize, launch, new-instance
+- `watcher`: `SetWinEventHook` subscriptions, drained by the main thread
+- `apps`: the window model, its taskbar visibility predicate, and AppUserModelID /
+  exe-path grouping
+- `window_class` / `window_text`: class names, titles and the owning executable
+- `activate`: foreground, restore, minimize, launch
 - `icons`: extraction and the in-memory cache
 - `monitor`: monitor geometry, per-monitor DPI, fullscreen foreground detection
 - `clipboard` / `synth_input`: snippet delivery
@@ -65,10 +68,16 @@ header it came from.
 
 ### kile-wheel-9000 (wheel binary)
 
-- `main`: startup order, message loop, event dispatch
+A thin `main.rs` over a library, so the parts worth testing are not stuck behind the
+manifest's elevation request.
+
+- `lib`: startup order, logging, single-instance handoff
+- `app`: the message loop and event dispatch
 - `overlay`: the hidden topmost window, its styles and lifecycle
 - `render`: D3D11 + DirectComposition + Direct2D + DirectWrite drawing
-- `state`: current tab, selection, mode (normal / sub-wheel / edit), animation clocks
+- `slots`: what each slot shows
+- `state`: selection, mode (normal / sub-wheel / edit), animation clocks
+- `theme`: sizes and colours, scaled per monitor DPI
 
 ## Threading
 

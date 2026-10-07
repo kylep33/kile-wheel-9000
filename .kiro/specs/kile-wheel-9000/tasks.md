@@ -5,13 +5,13 @@ and gets its own commit.
 
 ## Phase 0 — Scaffold
 
-- [ ] 0.1 Create the cargo workspace with `core`, `platform` and `wheel` crates
+- [x] 0.1 Create the cargo workspace with `core`, `platform` and `wheel` crates
   - Shared dependency versions and lint config in the workspace manifest
   - `APP_NAME` constant in `core`, consumed by the binary and matched by `app-common.ps1`
   - Pin the toolchain in `rust-toolchain.toml` for reproducible builds
   - _Requirements: 10.1, 10.3_
 
-- [ ] 0.2 Write `install.ps1`, `uninstall.ps1` and `app-common.ps1`
+- [x] 0.2 Write `install.ps1`, `uninstall.ps1` and `app-common.ps1`
   - Idempotent prereq stage that installs rustup and the MSVC C++ build tools only
     when missing
   - Build, stop, copy, config-dir, logon task, start, summary
@@ -22,23 +22,23 @@ and gets its own commit.
 Goal: Caps Lock opens an 8-slot wheel of running apps, direction selects, Enter or
 click activates, within the 50 ms budget.
 
-- [ ] 1.1 Single instance, elevation manifest and DPI awareness
+- [x] 1.1 Single instance, elevation manifest and DPI awareness
   - Named mutex guard; a second launch signals the first instead of running
   - Embed a manifest requesting `requireAdministrator` and per-monitor DPI v2
   - _Requirements: 8.1, 8.2, 8.3_
 
-- [ ] 1.2 Logging to a rotating file in the config folder
+- [x] 1.2 Logging to a rotating file in the config folder
   - Resolve `%APPDATA%` through `SHGetKnownFolderPath`, not an env var read
   - _Requirements: 7.1, 8.5_
 
-- [ ] 1.3 Binding model and the latching state machine in `core`
+- [x] 1.3 Binding model and the latching state machine in `core`
   - Parse bindings from key, combo and mouse-button forms into a lookup table
   - Latching reduces to the single perpendicular-or-fresh rule
   - Unit tests for the full transition table and for angle-to-slot across all sectors
     plus the dead zone
   - _Requirements: 1.2, 2.2, 2.3, 2.4, 2.5, 2.7_
 
-- [ ] 1.4 Low-level hook thread
+- [x] 1.4 Low-level hook thread
   - `WH_KEYBOARD_LL` and `WH_MOUSE_LL` installed on an owned thread with its own
     message loop
   - Swallow decision is one atomic load plus one uncontended read lock, then return
@@ -47,20 +47,20 @@ click activates, within the 50 ms budget.
   - Semantic events forwarded to main by MPSC push plus `PostMessage` wake
   - _Requirements: 1.1, 1.3, 1.4, 1.5, 1.7, 1.8, 1.10, 9.6_
 
-- [ ] 1.5 Overlay window
+- [x] 1.5 Overlay window
   - Created hidden at startup, `WS_POPUP` with topmost, noactivate, toolwindow and
     noredirectionbitmap
   - Sized and centered on the monitor under the cursor
   - _Requirements: 3.1, 9.2_
 
-- [ ] 1.6 DirectComposition and Direct2D renderer
+- [x] 1.6 DirectComposition and Direct2D renderer
   - D3D11 device to DComp device, one target and one visual backed by a flip-model
     swapchain with premultiplied alpha
   - Draw 8 slots, the hub, and the hover highlight with DirectWrite text
   - Present before show so the first frame is never stale
   - _Requirements: 3.3, 3.5, 9.1_
 
-- [ ] 1.7 Running-window model
+- [x] 1.7 Running-window model
   - One `EnumWindows` at startup, then incremental WinEvent updates
   - Taskbar visibility predicate; group by AppUserModelID falling back to exe path
   - Tune the predicate against a real desktop
@@ -70,7 +70,7 @@ click activates, within the 50 ms budget.
   - Extract once per group key, off the main thread
   - _Requirements: 5.1, 9.4_
 
-- [ ] 1.9 Selection and activation
+- [x] 1.9 Selection and activation
   - Mouse angle selection with the hub dead zone, cursor centering on open
   - Keyboard and mouse mix with last-moved owning the selection
   - Launch when nothing is open, focus when one window, minimize when already focused
