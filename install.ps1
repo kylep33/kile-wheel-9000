@@ -198,8 +198,12 @@ if ($PrereqsOnly) {
 }
 
 $version = Get-WheelVersion
-$binary = Invoke-ReleaseBuild
+
+# stop first: a dev run launched straight out of target\ holds a lock on the very file
+# the linker is about to write
 Stop-AppInstance
+
+$binary = Invoke-ReleaseBuild
 Install-Binary $binary
 Install-ConfigDirs
 
