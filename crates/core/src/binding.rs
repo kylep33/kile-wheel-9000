@@ -3,6 +3,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+use serde::Deserialize;
 use thiserror::Error;
 
 const SEPARATOR: char = '+';
@@ -13,10 +14,8 @@ const VK_ESCAPE_PREFIX: &str = "vk(";
 const VK_ESCAPE_SUFFIX: &str = ")";
 const HEX_PREFIX: &str = "0x";
 
-const CTRL_NAME: &str = "Ctrl";
-const SHIFT_NAME: &str = "Shift";
-const ALT_NAME: &str = "Alt";
-const WIN_NAME: &str = "Win";
+/// Written in the order Windows itself uses, so `Alt+Shift` round-trips unchanged.
+const MODIFIER_NAMES: [&str; 4] = ["Ctrl", "Alt", "Shift", "Win"];
 
 /// A Win32 virtual-key code. Held numerically so an unnamed key can still bind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -64,7 +63,27 @@ pub mod keys {
     pub const D: KeyCode = KeyCode(b'D' as u16);
     pub const S: KeyCode = KeyCode(b'S' as u16);
     pub const W: KeyCode = KeyCode(b'W' as u16);
-    pub const DIGIT_0: KeyCode = KeyCode(b'0' as u16);
+    pub const DIGIT_1: KeyCode = KeyCode(b'1' as u16);
+    pub const DIGIT_9: KeyCode = KeyCode(b'9' as u16);
+}
+
+/// Every key that only ever acts as a modifier, in any of its forms.
+const MODIFIER_KEYS: &[KeyCode] = &[
+    keys::CTRL,
+    keys::ALT,
+    keys::SHIFT,
+    keys::LEFT_CTRL,
+    keys::RIGHT_CTRL,
+    keys::LEFT_ALT,
+    keys::RIGHT_ALT,
+    keys::LEFT_SHIFT,
+    keys::RIGHT_SHIFT,
+    keys::LEFT_WIN,
+    keys::RIGHT_WIN,
+];
+
+pub fn is_modifier_key(key: KeyCode) -> bool {
+    MODIFIER_KEYS.contains(&key)
 }
 
 /// Canonical name first; later spellings parse but never print.
@@ -72,9 +91,6 @@ const NAMED_KEYS: &[(&str, KeyCode)] = &[
     ("Backspace", keys::BACKSPACE),
     ("Tab", keys::TAB),
     ("Enter", keys::ENTER),
-    ("Shift", keys::SHIFT),
-    ("Ctrl", keys::CTRL),
-    ("Alt", keys::ALT),
     ("Pause", keys::PAUSE),
     ("CapsLock", keys::CAPS_LOCK),
     ("Esc", keys::ESC),
@@ -91,18 +107,9 @@ const NAMED_KEYS: &[(&str, KeyCode)] = &[
     ("PrintScreen", keys::PRINT_SCREEN),
     ("Insert", keys::INSERT),
     ("Delete", keys::DELETE),
-    ("Win", keys::LEFT_WIN),
-    ("LWin", keys::LEFT_WIN),
-    ("RWin", keys::RIGHT_WIN),
     ("Apps", keys::APPS),
     ("NumLock", keys::NUM_LOCK),
     ("ScrollLock", keys::SCROLL_LOCK),
-    ("LShift", keys::LEFT_SHIFT),
-    ("RShift", keys::RIGHT_SHIFT),
-    ("LCtrl", keys::LEFT_CTRL),
-    ("RCtrl", keys::RIGHT_CTRL),
-    ("LAlt", keys::LEFT_ALT),
-    ("RAlt", keys::RIGHT_ALT),
 ];
 
 /// Mouse buttons a binding can use, including the two side buttons.
@@ -133,72 +140,90 @@ impl MouseButton {
     }
 }
 
-/// What a binding fires on.
+/// What a binding fires on, beyond the modifiers it needs held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Trigger {
     Key(KeyCode),
     Mouse(MouseButton),
 }
 
-/// Modifiers that must be held, exactly. Shift+CapsLock therefore misses a
+/// Modifiers that must be held, exactly. Shift+CapsLock therefore misses a bare
 /// CapsLock binding, which is what lets real Caps Lock through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Modifiers {
     pub ctrl: bool,
-    pub shift: bool,
     pub alt: bool,
+    pub shift: bool,
     pub win: bool,
 }
 
 impl Modifiers {
-    /// Fixed order keeps the written form stable across saves.
-    pub fn names(self) -> impl Iterator<Item = &'static str> {
-        [
-            (self.ctrl, CTRL_NAME),
-            (self.shift, SHIFT_NAME),
-            (self.alt, ALT_NAME),
-            (self.win, WIN_NAME),
-        ]
-        .into_iter()
-        .filter_map(|(held, name)| held.then_some(name))
+    pub fn any(self) -> bool {
+        self.ctrl || self.alt || self.shift || self.win
     }
 
-    /// Drops the modifier that `trigger` itself is, so a binding on a bare modifier
-    /// key still matches while that key is physically down.
-    pub fn without_trigger(mut self, trigger: KeyCode) -> Self {
-        match trigger {
-            keys::CTRL | keys::LEFT_CTRL | keys::RIGHT_CTRL => self.ctrl = false,
-            keys::SHIFT | keys::LEFT_SHIFT | keys::RIGHT_SHIFT => self.shift = false,
-            keys::ALT | keys::LEFT_ALT | keys::RIGHT_ALT => self.alt = false,
-            keys::LEFT_WIN | keys::RIGHT_WIN => self.win = false,
-            _ => {}
-        }
-        self
+    fn held(self) -> [bool; MODIFIER_NAMES.len()] {
+        [self.ctrl, self.alt, self.shift, self.win]
     }
 }
 
 /// A key, combo, or mouse button that the hook watches for.
+///
+/// `trigger` is `None` for a modifier-only binding such as `Alt+Shift`, which fires on
+/// whichever of its modifiers completes the set. That makes press order irrelevant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Binding {
     pub modifiers: Modifiers,
-    pub trigger: Trigger,
+    pub trigger: Option<Trigger>,
 }
 
 impl Binding {
     pub fn key(trigger: KeyCode) -> Self {
         Self {
             modifiers: Modifiers::default(),
-            trigger: Trigger::Key(trigger),
+            trigger: Some(Trigger::Key(trigger)),
+        }
+    }
+
+    /// The binding a key press should be looked up as.
+    ///
+    /// `held` already includes the key being pressed, so a modifier press can only ever
+    /// complete a modifier-only combo.
+    pub fn for_key_press(key: KeyCode, held: Modifiers) -> Self {
+        let trigger = (!is_modifier_key(key)).then_some(Trigger::Key(key));
+
+        Self {
+            modifiers: held,
+            trigger,
+        }
+    }
+
+    pub fn for_button_press(button: MouseButton, held: Modifiers) -> Self {
+        Self {
+            modifiers: held,
+            trigger: Some(Trigger::Mouse(button)),
         }
     }
 }
 
 /// What a matched binding does to the wheel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Action {
     Open,
     Close,
     Toggle,
+}
+
+impl Action {
+    /// A close only means something while the wheel is open. Without this, binding Esc
+    /// to close would swallow Esc in every other app.
+    fn applies(self, wheel_open: bool) -> bool {
+        match self {
+            Self::Close => wheel_open,
+            Self::Open | Self::Toggle => true,
+        }
+    }
 }
 
 /// One config entry.
@@ -221,24 +246,16 @@ impl BindingTable {
 
     /// Scans linearly because there are only ever a handful of bindings, which beats
     /// hashing and allocates nothing on the hook path.
-    pub fn action_for(&self, binding: Binding) -> Option<Action> {
+    pub fn action_for(&self, binding: Binding, wheel_open: bool) -> Option<Action> {
         self.hotkeys
             .iter()
-            .find(|hotkey| hotkey.binding == binding)
+            .find(|hotkey| hotkey.binding == binding && hotkey.action.applies(wheel_open))
             .map(|hotkey| hotkey.action)
     }
 
     pub fn hotkeys(&self) -> &[Hotkey] {
         &self.hotkeys
     }
-}
-
-/// Caps Lock opens the wheel until the config says otherwise.
-pub fn default_hotkeys() -> Vec<Hotkey> {
-    vec![Hotkey {
-        binding: Binding::key(keys::CAPS_LOCK),
-        action: Action::Open,
-    }]
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -250,7 +267,7 @@ pub enum ParseBindingError {
     BlankPart(String),
 
     #[error(
-        "\"{0}\" is not a known key or mouse button; use a name such as \"CapsLock\", \"F13\", \"XButton1\", or \"vk(0x5B)\" for an unnamed key"
+        "\"{0}\" is not a known key or mouse button; use a name such as \"CapsLock\", \"Alt+Shift\", \"F13\", \"XButton1\", or \"vk(0x5B)\" for an unnamed key"
     )]
     UnknownKey(String),
 
@@ -274,23 +291,47 @@ impl FromStr for Binding {
             return Err(ParseBindingError::BlankPart(whole.to_owned()));
         }
 
+        // all modifiers means the combo itself is the binding, with no distinct trigger
+        if let Some(modifiers) = all_modifiers(&parts) {
+            return Ok(Self {
+                modifiers,
+                trigger: None,
+            });
+        }
+
         let (last, leading) = parts.split_last().expect("split always yields a part");
         let trigger =
             parse_trigger(last).ok_or_else(|| ParseBindingError::UnknownKey((*last).to_owned()))?;
 
         Ok(Self {
             modifiers: parse_modifiers(leading, whole)?,
-            trigger,
+            trigger: Some(trigger),
         })
     }
 }
 
 impl fmt::Display for Binding {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for name in self.modifiers.names() {
-            write!(formatter, "{name}{SEPARATOR}")?;
+        let mut written = false;
+        for (held, name) in self.modifiers.held().into_iter().zip(MODIFIER_NAMES) {
+            if !held {
+                continue;
+            }
+            if written {
+                formatter.write_fmt(format_args!("{SEPARATOR}"))?;
+            }
+            formatter.write_str(name)?;
+            written = true;
         }
-        match self.trigger {
+
+        let Some(trigger) = self.trigger else {
+            return Ok(());
+        };
+        if written {
+            formatter.write_fmt(format_args!("{SEPARATOR}"))?;
+        }
+
+        match trigger {
             Trigger::Mouse(button) => formatter.write_str(button.name()),
             Trigger::Key(code) => write!(formatter, "{code}"),
         }
@@ -316,6 +357,17 @@ impl fmt::Display for KeyCode {
     }
 }
 
+/// `Some` only when every part names a modifier.
+fn all_modifiers(parts: &[&str]) -> Option<Modifiers> {
+    let mut modifiers = Modifiers::default();
+    for part in parts {
+        if !apply_modifier(&mut modifiers, part) {
+            return None;
+        }
+    }
+    Some(modifiers)
+}
+
 fn parse_modifiers(parts: &[&str], whole: &str) -> Result<Modifiers, ParseBindingError> {
     let mut modifiers = Modifiers::default();
     for part in parts {
@@ -333,8 +385,8 @@ fn parse_modifiers(parts: &[&str], whole: &str) -> Result<Modifiers, ParseBindin
 fn apply_modifier(modifiers: &mut Modifiers, name: &str) -> bool {
     match name.to_ascii_lowercase().as_str() {
         "ctrl" | "control" => modifiers.ctrl = true,
-        "shift" => modifiers.shift = true,
         "alt" => modifiers.alt = true,
+        "shift" => modifiers.shift = true,
         "win" | "super" | "meta" => modifiers.win = true,
         _ => return false,
     }
@@ -432,7 +484,7 @@ mod tests {
     fn a_bare_key_name_parses_without_modifiers() {
         let binding = parse("CapsLock");
 
-        assert_eq!(binding.trigger, Trigger::Key(keys::CAPS_LOCK));
+        assert_eq!(binding.trigger, Some(Trigger::Key(keys::CAPS_LOCK)));
         assert_eq!(binding.modifiers, Modifiers::default());
     }
 
@@ -449,41 +501,70 @@ mod tests {
     }
 
     #[test]
+    fn a_modifier_only_combo_has_no_trigger() {
+        let binding = parse("Alt+Shift");
+
+        assert_eq!(binding.trigger, None);
+        assert!(binding.modifiers.alt && binding.modifiers.shift);
+    }
+
+    #[test]
+    fn a_modifier_only_combo_matches_in_either_press_order() {
+        let both = Modifiers {
+            alt: true,
+            shift: true,
+            ..Modifiers::default()
+        };
+
+        // whichever modifier lands last is the one that completes the set
+        assert_eq!(
+            Binding::for_key_press(keys::LEFT_SHIFT, both),
+            parse("Alt+Shift")
+        );
+        assert_eq!(
+            Binding::for_key_press(keys::RIGHT_ALT, both),
+            parse("Alt+Shift")
+        );
+    }
+
+    #[test]
     fn letters_digits_and_function_keys_map_to_their_codes() {
-        assert_eq!(parse("K").trigger, Trigger::Key(KeyCode(b'K' as u16)));
-        assert_eq!(parse("7").trigger, Trigger::Key(KeyCode(b'7' as u16)));
-        assert_eq!(parse("F13").trigger, Trigger::Key(KeyCode(0x7C)));
-        assert_eq!(parse("f24").trigger, Trigger::Key(KeyCode(0x87)));
+        assert_eq!(parse("K").trigger, Some(Trigger::Key(KeyCode(b'K' as u16))));
+        assert_eq!(parse("7").trigger, Some(Trigger::Key(KeyCode(b'7' as u16))));
+        assert_eq!(parse("F13").trigger, Some(Trigger::Key(KeyCode(0x7C))));
+        assert_eq!(parse("f24").trigger, Some(Trigger::Key(KeyCode(0x87))));
     }
 
     #[test]
     fn mouse_buttons_parse_as_triggers() {
-        assert_eq!(parse("XButton1").trigger, Trigger::Mouse(MouseButton::X1));
+        assert_eq!(
+            parse("XButton1").trigger,
+            Some(Trigger::Mouse(MouseButton::X1))
+        );
         assert_eq!(
             parse("Ctrl+MouseMiddle").trigger,
-            Trigger::Mouse(MouseButton::Middle)
+            Some(Trigger::Mouse(MouseButton::Middle))
         );
     }
 
     #[test]
     fn an_unnamed_key_binds_through_the_vk_escape() {
-        assert_eq!(parse("vk(0x5B)").trigger, Trigger::Key(keys::LEFT_WIN));
-        assert_eq!(parse("VK(91)").trigger, Trigger::Key(keys::LEFT_WIN));
-    }
-
-    #[test]
-    fn a_modifier_alone_can_be_the_trigger() {
-        assert_eq!(parse("Shift").trigger, Trigger::Key(keys::SHIFT));
+        assert_eq!(
+            parse("vk(0x14)").trigger,
+            Some(Trigger::Key(keys::CAPS_LOCK))
+        );
+        assert_eq!(parse("VK(20)").trigger, Some(Trigger::Key(keys::CAPS_LOCK)));
     }
 
     #[test]
     fn every_form_round_trips_through_display() {
         for text in [
             "CapsLock",
+            "Alt+Shift",
+            "Ctrl+Alt+Shift+Win",
             "Ctrl+Shift+K",
             "Alt+F13",
             "Win+XButton2",
-            "Shift",
             "7",
         ] {
             assert_eq!(parse(text).to_string(), text);
@@ -520,44 +601,37 @@ mod tests {
 
     #[test]
     fn exact_modifiers_keep_shift_capslock_off_a_capslock_binding() {
-        let table = BindingTable::new(default_hotkeys());
-        let shifted = Binding {
-            modifiers: Modifiers {
-                shift: true,
-                ..Modifiers::default()
-            },
-            trigger: Trigger::Key(keys::CAPS_LOCK),
-        };
-
-        assert_eq!(
-            table.action_for(Binding::key(keys::CAPS_LOCK)),
-            Some(Action::Open)
-        );
-        assert_eq!(table.action_for(shifted), None);
-    }
-
-    #[test]
-    fn a_trigger_modifier_does_not_count_as_held() {
-        let all_held = Modifiers {
-            ctrl: true,
+        let table = BindingTable::new(vec![Hotkey {
+            binding: Binding::key(keys::CAPS_LOCK),
+            action: Action::Toggle,
+        }]);
+        let shift_held = Modifiers {
             shift: true,
-            alt: true,
-            win: true,
-        };
-
-        assert!(!all_held.without_trigger(keys::LEFT_SHIFT).shift);
-        assert!(!all_held.without_trigger(keys::CTRL).ctrl);
-        assert!(!all_held.without_trigger(keys::RIGHT_ALT).alt);
-        assert!(!all_held.without_trigger(keys::LEFT_WIN).win);
-    }
-
-    #[test]
-    fn an_unrelated_trigger_leaves_modifiers_alone() {
-        let held = Modifiers {
-            ctrl: true,
             ..Modifiers::default()
         };
 
-        assert_eq!(held.without_trigger(keys::CAPS_LOCK), held);
+        assert_eq!(
+            table.action_for(
+                Binding::for_key_press(keys::CAPS_LOCK, Modifiers::default()),
+                false
+            ),
+            Some(Action::Toggle)
+        );
+        assert_eq!(
+            table.action_for(Binding::for_key_press(keys::CAPS_LOCK, shift_held), false),
+            None
+        );
+    }
+
+    #[test]
+    fn a_close_binding_is_ignored_while_the_wheel_is_shut() {
+        let table = BindingTable::new(vec![Hotkey {
+            binding: Binding::key(keys::ESC),
+            action: Action::Close,
+        }]);
+        let pressed = Binding::for_key_press(keys::ESC, Modifiers::default());
+
+        assert_eq!(table.action_for(pressed, false), None);
+        assert_eq!(table.action_for(pressed, true), Some(Action::Close));
     }
 }

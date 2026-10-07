@@ -1,4 +1,5 @@
-//! Wheel geometry: the fixed slot count and the directions that address it.
+//! Wheel geometry: the fixed slot count, the tabs that hold them, and the directions
+//! that address them.
 
 /// A position on the wheel. Slot 0 is north and the rest run clockwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -13,12 +14,44 @@ impl Slot {
         Self((index % Self::COUNT) as u8)
     }
 
+    pub fn new(index: usize) -> Option<Self> {
+        (index < Self::COUNT).then_some(Self(index as u8))
+    }
+
     pub fn index(self) -> usize {
         usize::from(self.0)
     }
 
     pub fn all() -> impl Iterator<Item = Self> {
         (0..Self::COUNT as u8).map(Self)
+    }
+}
+
+/// A page of eight slots. Numbered from 1 because that is how the config spells it and
+/// how the number keys select it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Tab(u8);
+
+impl Tab {
+    /// One per number key, which is what caps it at nine.
+    pub const MAX_COUNT: usize = 9;
+    pub const FIRST: Self = Self(0);
+
+    pub fn from_number(number: usize) -> Option<Self> {
+        let index = number.checked_sub(1)?;
+        Self::from_index(index)
+    }
+
+    pub fn from_index(index: usize) -> Option<Self> {
+        (index < Self::MAX_COUNT).then_some(Self(index as u8))
+    }
+
+    pub fn index(self) -> usize {
+        usize::from(self.0)
+    }
+
+    pub fn number(self) -> usize {
+        self.index() + 1
     }
 }
 
@@ -88,10 +121,29 @@ mod tests {
     }
 
     #[test]
+    fn slot_new_rejects_out_of_range() {
+        assert_eq!(Slot::new(Slot::COUNT - 1).map(Slot::index), Some(7));
+        assert_eq!(Slot::new(Slot::COUNT), None);
+    }
+
+    #[test]
     fn all_yields_every_slot_once_in_order() {
         let indices: Vec<usize> = Slot::all().map(Slot::index).collect();
 
         assert_eq!(indices, (0..Slot::COUNT).collect::<Vec<usize>>());
+    }
+
+    #[test]
+    fn tabs_are_numbered_from_one() {
+        assert_eq!(Tab::from_number(1), Some(Tab::FIRST));
+        assert_eq!(Tab::from_number(1).map(Tab::index), Some(0));
+        assert_eq!(Tab::from_number(9).map(Tab::index), Some(8));
+    }
+
+    #[test]
+    fn tab_numbers_outside_one_to_nine_are_rejected() {
+        assert_eq!(Tab::from_number(0), None);
+        assert_eq!(Tab::from_number(Tab::MAX_COUNT + 1), None);
     }
 
     #[test]

@@ -1,21 +1,21 @@
 //! The overlay window. Created hidden at startup, so opening only shows it.
 
 use anyhow::{Context, Result};
-use kile_wheel_core::slot::Slot;
+use kile_wheel_core::config::Config;
+use kile_wheel_platform::icons::IconImage;
 use kile_wheel_platform::monitor::Monitor;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, FindWindowW, HWND_TOPMOST, PostMessageW, PostQuitMessage,
-    RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOREDRAW, SetWindowPos,
-    ShowWindow, WM_APP, WM_DESTROY, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, FindWindowW, HWND_TOPMOST, KillTimer, PostMessageW,
+    PostQuitMessage, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOREDRAW,
+    SetTimer, SetWindowPos, ShowWindow, WM_APP, WM_DESTROY, WNDCLASSEXW, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{HSTRING, PCWSTR};
 
-use crate::render::Renderer;
-use crate::slots::SlotRow;
-use crate::theme::Metrics;
+use crate::render::{Frame, Renderer};
+use crate::theme::{Metrics, Palette};
 
 /// Also how a second launch finds the running instance.
 const WINDOW_CLASS: &str = "kile-wheel-9000.overlay";
@@ -23,34 +23,34 @@ const WINDOW_CLASS: &str = "kile-wheel-9000.overlay";
 /// Asks an already running instance to open its wheel.
 pub const WM_OPEN_WHEEL: u32 = WM_APP + 2;
 
+/// The one timer this window uses, for the click-and-hold that toggles edit mode.
+const HOLD_TIMER: usize = 1;
+
 /// The hidden topmost window and the GPU resources behind it.
 #[derive(Debug)]
 pub struct Overlay {
     window: HWND,
     renderer: Renderer,
-    metrics: Metrics,
     centre: POINT,
 }
 
 impl Overlay {
-    /// Creates the window hidden, at the size the primary monitor's DPI wants, so the
-    /// first open only has to move and show it.
-    pub fn create(monitor: Monitor) -> Result<Self> {
-        let metrics = Metrics::for_dpi(monitor.dpi);
+    /// Creates the window hidden, so the first open only has to move and show it.
+    pub fn create(monitor: Monitor, config: &Config) -> Result<Self> {
+        let metrics = metrics_for(monitor, config);
         let size_px = metrics.window_size_px();
 
         let window = create_window(size_px).context(
             "could not create the overlay window; the window class or display driver refused it",
         )?;
 
-        let renderer = Renderer::new(window, size_px as u32, metrics).context(
+        let renderer = Renderer::new(window, size_px as u32, metrics, palette_for(config)).context(
             "could not set up Direct2D on DirectComposition; the display driver may not support a composition swap chain",
         )?;
 
         Ok(Self {
             window,
             renderer,
-            metrics,
             centre: monitor.center(),
         })
     }
@@ -60,18 +60,27 @@ impl Overlay {
     }
 
     pub fn metrics(&self) -> Metrics {
-        self.metrics
+        self.renderer.metrics()
     }
 
-    /// Screen position of the wheel centre, which is what cursor angles are measured
-    /// from.
+    /// Screen position of the wheel centre, which is what cursor angles are measured from.
     pub fn centre(&self) -> POINT {
         self.centre
     }
 
+    pub fn has_icon(&self, key: &str) -> bool {
+        self.renderer.has_icon(key)
+    }
+
+    pub fn upload_icon(&mut self, key: &str, image: &IconImage) -> Result<()> {
+        self.renderer
+            .upload_icon(key, image)
+            .context("Direct2D refused the icon bitmap")
+    }
+
     /// Centres the window on the monitor and matches the swap chain to its DPI.
-    pub fn place_on(&mut self, monitor: Monitor) -> Result<()> {
-        let metrics = Metrics::for_dpi(monitor.dpi);
+    pub fn place_on(&mut self, monitor: Monitor, config: &Config) -> Result<()> {
+        let metrics = metrics_for(monitor, config);
         let size_px = metrics.window_size_px();
         let centre = monitor.center();
 
@@ -90,23 +99,22 @@ impl Overlay {
         .context("could not move the overlay window onto the target monitor")?;
 
         self.renderer
-            .resize(size_px as u32, metrics)
+            .resize(size_px as u32, metrics, palette_for(config))
             .context("could not resize the overlay swap chain for the target monitor")?;
 
-        self.metrics = metrics;
         self.centre = centre;
         Ok(())
     }
 
-    pub fn draw(&self, slots: &SlotRow, selected: Option<Slot>, hub_label: &str) -> Result<()> {
+    pub fn draw(&self, frame: &Frame<'_>) -> Result<()> {
         self.renderer
-            .draw(slots, selected, hub_label)
+            .draw(frame)
             .context("could not draw the wheel")
     }
 
     pub fn show(&self) {
-        // SAFETY: SW_SHOWNOACTIVATE leaves the app underneath focused, which snippet
-        // paste and window activation both depend on.
+        // SAFETY: SW_SHOWNOACTIVATE leaves the app underneath focused, which snippet paste
+        // and window activation both depend on.
         let _ = unsafe { ShowWindow(self.window, SW_SHOWNOACTIVATE) };
     }
 
@@ -114,6 +122,26 @@ impl Overlay {
         // SAFETY: hides our own window.
         let _ = unsafe { ShowWindow(self.window, SW_HIDE) };
     }
+
+    /// Starts the click-and-hold clock. A timer is used rather than measuring on release,
+    /// so edit mode arrives while the button is still down.
+    pub fn start_hold_timer(&self, after_ms: u32) {
+        // SAFETY: targets our own window with no callback, so the message loop gets it.
+        unsafe { SetTimer(Some(self.window), HOLD_TIMER, after_ms, None) };
+    }
+
+    pub fn stop_hold_timer(&self) {
+        // SAFETY: killing a timer that is not running just fails.
+        let _ = unsafe { KillTimer(Some(self.window), HOLD_TIMER) };
+    }
+}
+
+fn metrics_for(monitor: Monitor, config: &Config) -> Metrics {
+    Metrics::new(monitor.dpi, config.wheel.scale())
+}
+
+fn palette_for(config: &Config) -> Palette {
+    Palette::new(config.wheel.accent(), config.wheel.opacity())
 }
 
 /// Hands a second launch over to the instance already running.
@@ -170,8 +198,8 @@ fn create_window(size_px: i32) -> windows::core::Result<HWND> {
     }
 }
 
-/// The wheel reads its input from the low-level hooks, so this only has to let the
-/// window be created and destroyed.
+/// The wheel reads its input from the low-level hooks, so this only has to let the window
+/// be created and destroyed. The timer and wake messages are handled in the main loop.
 unsafe extern "system" fn window_proc(
     window: HWND,
     message: u32,

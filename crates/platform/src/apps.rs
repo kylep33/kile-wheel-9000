@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use windows::Win32::Foundation::{HWND, LPARAM, TRUE};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
@@ -40,6 +40,9 @@ pub struct WindowRef<'a> {
 #[derive(Debug, Clone)]
 pub struct AppGroup<'a> {
     pub key: &'a AppKey,
+    /// Path of the owning executable, even when grouping went by AppUserModelID. Used for
+    /// labels, because an id like `MSEdge.UserData.Profile2` reads badly on the wheel.
+    pub executable: Option<&'a Path>,
     pub windows: Vec<WindowRef<'a>>,
 }
 
@@ -47,6 +50,7 @@ pub struct AppGroup<'a> {
 struct TrackedWindow {
     handle: HWND,
     key: AppKey,
+    executable: Option<PathBuf>,
     title: String,
     /// Discovery order, which is what keeps group and window order stable.
     sequence: u64,
@@ -78,7 +82,9 @@ impl WindowModel {
         if !is_taskbar_window(window) {
             return;
         }
-        let Some(key) = app_key(window) else {
+
+        let executable = executable_path(window);
+        let Some(key) = app_key(window, executable.as_deref()) else {
             return;
         };
 
@@ -89,6 +95,7 @@ impl WindowModel {
             TrackedWindow {
                 handle: window,
                 key,
+                executable,
                 title: title(window),
                 sequence,
             },
@@ -155,13 +162,15 @@ impl WindowModel {
 fn build_group<'a>(key: &'a AppKey, mut windows: Vec<&'a TrackedWindow>) -> (u64, AppGroup<'a>) {
     windows.sort_by_key(|tracked| tracked.sequence);
 
-    let first_seen = windows
+    let first = windows
         .first()
-        .expect("a group is only built from at least one window")
-        .sequence;
+        .expect("a group is only built from at least one window");
+    let first_seen = first.sequence;
+    let executable = first.executable.as_deref();
 
     let group = AppGroup {
         key,
+        executable,
         windows: windows
             .into_iter()
             .map(|tracked| WindowRef {
@@ -225,11 +234,11 @@ fn is_cloaked(window: HWND) -> bool {
     read.is_ok() && cloaked != 0
 }
 
-fn app_key(window: HWND) -> Option<AppKey> {
+fn app_key(window: HWND, executable: Option<&Path>) -> Option<AppKey> {
     if let Some(id) = user_model_id(window) {
         return Some(AppKey::UserModelId(id));
     }
-    executable_path(window).map(AppKey::Executable)
+    executable.map(|path| AppKey::Executable(path.to_owned()))
 }
 
 fn user_model_id(window: HWND) -> Option<String> {

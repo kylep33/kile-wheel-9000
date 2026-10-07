@@ -18,6 +18,7 @@ test = false
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 kile-wheel-core.workspace = true
 kile-wheel-platform.workspace = true
 tracing.workspace = true

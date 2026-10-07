@@ -1,0 +1,107 @@
+# kile-wheel-9000 config.
+#
+# Edit by hand or through the settings window; comments here survive either way.
+# Paths may use environment variables such as %USERPROFILE%.
+# Icon paths are relative to this folder, so copying the folder moves your setup.
+
+[general]
+start_with_windows = true
+# ignore hotkeys while a fullscreen app has focus
+disable_in_fullscreen = true
+# activating the app that already has focus minimizes it, like the taskbar
+minimize_if_focused = true
+show_clock = true
+
+# Any number of hotkeys. action is "open", "close" or "toggle".
+# Esc always closes the wheel and Backspace always backs out one level, so neither
+# needs a binding here.
+[[hotkeys]]
+binding = "CapsLock"
+action = "toggle"
+
+# Alt+Shift is the Windows keyboard-layout switch. Binding it here stops that working.
+# [[hotkeys]]
+# binding = "Alt+Shift"
+# action = "toggle"
+
+# Mouse buttons bind too. XButton1 and XButton2 are usually browser back and forward.
+# [[hotkeys]]
+# binding = "XButton1"
+# action = "toggle"
+
+[wheel]
+# "cursor" opens on the monitor under the pointer, "primary" always on the main one
+monitor = "cursor"
+center_cursor = true
+# "normal", "fast" or "off"
+animation = "fast"
+# whether the open hotkey also closes an already open wheel
+open_hotkey_closes = false
+size = 1.0
+opacity = 1.0
+accent = "#D8B36A"
+empty_quips = [
+    "FEED ME",
+    "I'M HUNGRY",
+    "*crickets*",
+    "vacancy",
+    "404: app not found",
+    "room for rent",
+    "insert app here",
+]
+
+# Up to nine tabs, numbered 1 to 9 and selected with the number keys.
+[[tabs]]
+index = 1
+name = "Main"
+
+# Pinned entries. Each one claims a tab and a slot.
+# Slots are numbered 0 at the top then clockwise, so 0 is N, 2 is E, 4 is S, 6 is W.
+#
+# type = "app"      target = an exe, a shortcut, or shell:AppsFolder\<AppUserModelID>
+# type = "script"   path + exec, where {path} is replaced with path
+# type = "url"      url + optional browser and browser_args
+# type = "snippet"  text, mode = "clipboard" or "type"
+# type = "folder"   path, opened in Explorer
+# type = "terminal" profile + optional distro and cwd
+#
+# Snippets are stored here as plain text, so keep secrets out of them.
+
+# [[items]]
+# type = "app"
+# name = "VS Code"
+# target = "%LOCALAPPDATA%\\Programs\\Microsoft VS Code\\Code.exe"
+# tab = 1
+# slot = 0
+
+# [[items]]
+# type = "url"
+# name = "Jira"
+# url = "https://example.atlassian.net"
+# browser = "msedge.exe"
+# tab = 1
+# slot = 2
+
+# [[items]]
+# type = "script"
+# name = "Deploy"
+# path = "%USERPROFILE%\\scripts\\deploy.sh"
+# exec = "wt.exe -- \"C:\\Program Files\\Git\\bin\\bash.exe\" \"{path}\""
+# tab = 1
+# slot = 4
+
+# [[items]]
+# type = "folder"
+# name = "Projects"
+# path = "%USERPROFILE%\\projects"
+# tab = 1
+# slot = 6
+
+# [[items]]
+# type = "terminal"
+# name = "Ubuntu"
+# profile = "Ubuntu"
+# distro = "Ubuntu"
+# cwd = "~"
+# tab = 1
+# slot = 7

@@ -8,6 +8,9 @@ pub const APP_NAME: &str = "kile-wheel-9000";
 /// Shown in the tray, the settings window and installer output.
 pub const DISPLAY_NAME: &str = "Kile Wheel 9000";
 
+/// The settings window, installed beside the wheel.
+pub const SETTINGS_EXE: &str = "kile-wheel-9000-settings.exe";
+
 const CONFIG_FILE: &str = "config.toml";
 const ICONS_DIR: &str = "icons";
 const LOGS_DIR: &str = "logs";

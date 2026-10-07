@@ -128,7 +128,7 @@ impl SharedInput {
         if !wheel_open && self.hotkeys_suppressed.load(Ordering::Acquire) {
             return None;
         }
-        self.bindings().action_for(binding)
+        self.bindings().action_for(binding, wheel_open)
     }
 
     fn post_wake(&self) {
@@ -308,6 +308,7 @@ unsafe fn keyboard_swallows(code: i32, wparam: WPARAM, lparam: LPARAM) -> bool {
 
     let key = KeyCode(info.vkCode as u16);
     let trigger = Trigger::Key(key);
+    let modifiers = current_modifiers();
 
     if !matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN) {
         return on_release(
@@ -315,16 +316,16 @@ unsafe fn keyboard_swallows(code: i32, wparam: WPARAM, lparam: LPARAM) -> bool {
             trigger,
             InputEvent::Key {
                 code: key,
-                modifiers: current_modifiers(),
+                modifiers,
                 pressed: false,
             },
         );
     }
 
-    let modifiers = current_modifiers().without_trigger(key);
     on_press(
         shared,
-        Binding { modifiers, trigger },
+        trigger,
+        modifiers,
         InputEvent::Key {
             code: key,
             modifiers,
@@ -387,14 +388,7 @@ unsafe fn mouse_swallows(code: i32, wparam: WPARAM, lparam: LPARAM) -> bool {
     if !pressed {
         return on_release(shared, trigger, event);
     }
-    on_press(
-        shared,
-        Binding {
-            modifiers: current_modifiers(),
-            trigger,
-        },
-        event,
-    )
+    on_press(shared, trigger, current_modifiers(), event)
 }
 
 fn decode_button(message: u32, info: MSLLHOOKSTRUCT) -> Option<(MouseButton, bool)> {
@@ -422,15 +416,27 @@ fn side_button(info: MSLLHOOKSTRUCT) -> MouseButton {
 }
 
 /// Shared press path for keys and buttons. Reports whether to swallow.
-fn on_press(shared: &SharedInput, binding: Binding, event: InputEvent) -> bool {
+///
+/// The binding is built here rather than by the callers, so the key actually pressed is
+/// what gets remembered even when it only completed a modifier-only combo.
+fn on_press(
+    shared: &SharedInput,
+    trigger: Trigger,
+    modifiers: Modifiers,
+    event: InputEvent,
+) -> bool {
     let wheel_open = shared.is_wheel_open();
+    let binding = match trigger {
+        Trigger::Key(key) => Binding::for_key_press(key, modifiers),
+        Trigger::Mouse(button) => Binding::for_button_press(button, modifiers),
+    };
 
     if let Some(action) = shared.matched_action(binding, wheel_open) {
         shared.emit(InputEvent::Hotkey {
             action,
             seen_at: Instant::now(),
         });
-        remember(binding.trigger);
+        remember(trigger);
         return true;
     }
     if !wheel_open {
@@ -439,7 +445,7 @@ fn on_press(shared: &SharedInput, binding: Binding, event: InputEvent) -> bool {
 
     // everything is swallowed while the wheel is open, so nothing leaks into the app
     shared.emit(event);
-    remember(binding.trigger);
+    remember(trigger);
     true
 }
 

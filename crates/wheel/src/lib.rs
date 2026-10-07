@@ -1,7 +1,7 @@
 //! kile-wheel-9000: a hotkey-triggered radial app launcher for Windows.
 //!
-//! The binary beside this library is a thin entry point. Everything else lives here so
-//! it can be unit tested without the elevation the binary's manifest asks for.
+//! The binary beside this library is a thin entry point. Everything else lives here so it
+//! can be unit tested without the elevation the binary's manifest asks for.
 
 pub mod app;
 pub mod logging;
@@ -12,6 +12,7 @@ pub mod state;
 pub mod theme;
 
 use anyhow::{Context, Result};
+use kile_wheel_core::config;
 use kile_wheel_core::names::{APP_NAME, ConfigPaths, DISPLAY_NAME};
 use kile_wheel_platform::instance::{self, Claim};
 use kile_wheel_platform::known_folders;
@@ -46,5 +47,15 @@ pub fn run() -> Result<()> {
         .ok()
         .context("could not initialise COM on the main thread")?;
 
-    App::start()?.run()
+    let config_file = paths.config_file();
+    if config::write_default_if_missing(&config_file)
+        .context("could not write the starting config")?
+    {
+        info!(path = %config_file.display(), "wrote the starting config");
+    }
+
+    let config = config::load(&config_file)
+        .with_context(|| format!("could not read {}", config_file.display()))?;
+
+    App::start(paths, config)?.run()
 }
