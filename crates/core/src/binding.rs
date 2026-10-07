@@ -254,7 +254,9 @@ pub enum ParseBindingError {
     )]
     UnknownKey(String),
 
-    #[error("a mouse button has to be the last part of \"{0}\"; write modifiers first, as in \"Ctrl+XButton1\"")]
+    #[error(
+        "a mouse button has to be the last part of \"{0}\"; write modifiers first, as in \"Ctrl+XButton1\""
+    )]
     MouseNotLast(String),
 }
 
@@ -273,8 +275,8 @@ impl FromStr for Binding {
         }
 
         let (last, leading) = parts.split_last().expect("split always yields a part");
-        let trigger = parse_trigger(last)
-            .ok_or_else(|| ParseBindingError::UnknownKey((*last).to_owned()))?;
+        let trigger =
+            parse_trigger(last).ok_or_else(|| ParseBindingError::UnknownKey((*last).to_owned()))?;
 
         Ok(Self {
             modifiers: parse_modifiers(leading, whole)?,

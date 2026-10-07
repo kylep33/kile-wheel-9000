@@ -8,7 +8,10 @@ use crate::slot::{Cardinal, Direction, Slot};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Latch {
     Cardinal(Cardinal),
-    Diagonal { vertical: Cardinal, horizontal: Cardinal },
+    Diagonal {
+        vertical: Cardinal,
+        horizontal: Cardinal,
+    },
 }
 
 impl Latch {
@@ -82,7 +85,9 @@ mod tests {
         for key in keys {
             latch = Some(Latch::press(latch, *key));
         }
-        latch.expect("sequence must hold at least one key").direction()
+        latch
+            .expect("sequence must hold at least one key")
+            .direction()
     }
 
     #[test]
@@ -95,16 +100,34 @@ mod tests {
 
     #[test]
     fn perpendicular_keys_latch_a_diagonal_in_either_order() {
-        assert_eq!(after(&[Cardinal::North, Cardinal::East]), Direction::NorthEast);
-        assert_eq!(after(&[Cardinal::East, Cardinal::North]), Direction::NorthEast);
+        assert_eq!(
+            after(&[Cardinal::North, Cardinal::East]),
+            Direction::NorthEast
+        );
+        assert_eq!(
+            after(&[Cardinal::East, Cardinal::North]),
+            Direction::NorthEast
+        );
     }
 
     #[test]
     fn every_diagonal_is_reachable() {
-        assert_eq!(after(&[Cardinal::North, Cardinal::East]), Direction::NorthEast);
-        assert_eq!(after(&[Cardinal::South, Cardinal::East]), Direction::SouthEast);
-        assert_eq!(after(&[Cardinal::South, Cardinal::West]), Direction::SouthWest);
-        assert_eq!(after(&[Cardinal::North, Cardinal::West]), Direction::NorthWest);
+        assert_eq!(
+            after(&[Cardinal::North, Cardinal::East]),
+            Direction::NorthEast
+        );
+        assert_eq!(
+            after(&[Cardinal::South, Cardinal::East]),
+            Direction::SouthEast
+        );
+        assert_eq!(
+            after(&[Cardinal::South, Cardinal::West]),
+            Direction::SouthWest
+        );
+        assert_eq!(
+            after(&[Cardinal::North, Cardinal::West]),
+            Direction::NorthWest
+        );
     }
 
     #[test]
@@ -141,7 +164,12 @@ mod tests {
     #[test]
     fn a_diagonal_can_be_rebuilt_after_a_reset() {
         assert_eq!(
-            after(&[Cardinal::North, Cardinal::East, Cardinal::South, Cardinal::West]),
+            after(&[
+                Cardinal::North,
+                Cardinal::East,
+                Cardinal::South,
+                Cardinal::West
+            ]),
             Direction::SouthWest
         );
     }

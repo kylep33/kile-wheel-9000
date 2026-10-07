@@ -3,5 +3,5 @@
 pub mod angle;
 pub mod latch;
 
-pub use angle::{Offset, slot_at};
+pub use angle::{Offset, SECTOR_RAD, slot_at};
 pub use latch::Latch;

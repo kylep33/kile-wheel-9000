@@ -18,6 +18,9 @@ tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
+# must track what the windows crate itself uses, or Direct2D's Vector2 is a different type
+windows-numerics = "0.3.1"
+
 # features unify across the workspace anyway, so they are declared once here
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",

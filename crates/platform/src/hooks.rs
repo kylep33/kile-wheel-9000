@@ -8,8 +8,11 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, RwLockReadGuard};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
-use kile_wheel_core::binding::{Action, Binding, BindingTable, KeyCode, Modifiers, MouseButton, Trigger};
+use kile_wheel_core::binding::{
+    Action, Binding, BindingTable, KeyCode, Modifiers, MouseButton, Trigger,
+};
 use thiserror::Error;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
@@ -40,7 +43,11 @@ static SHARED: OnceLock<Arc<SharedInput>> = OnceLock::new();
 /// What the hook decided happened, in wheel terms rather than win32 terms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputEvent {
-    Hotkey(Action),
+    Hotkey {
+        action: Action,
+        /// When the hook saw it, so the open latency can be measured end to end.
+        seen_at: Instant,
+    },
     Key {
         code: KeyCode,
         modifiers: Modifiers,
@@ -419,7 +426,10 @@ fn on_press(shared: &SharedInput, binding: Binding, event: InputEvent) -> bool {
     let wheel_open = shared.is_wheel_open();
 
     if let Some(action) = shared.matched_action(binding, wheel_open) {
-        shared.emit(InputEvent::Hotkey(action));
+        shared.emit(InputEvent::Hotkey {
+            action,
+            seen_at: Instant::now(),
+        });
         remember(binding.trigger);
         return true;
     }

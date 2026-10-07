@@ -9,6 +9,13 @@ publish.workspace = true
 [lints]
 workspace = true
 
+# the embedded manifest asks for elevation, so a test harness built from the bin could
+# not be run; the tests live in the library instead
+[[bin]]
+name = "kile-wheel-9000"
+path = "src/main.rs"
+test = false
+
 [dependencies]
 anyhow.workspace = true
 kile-wheel-core.workspace = true
@@ -17,3 +24,4 @@ tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
 windows.workspace = true
+windows-numerics.workspace = true

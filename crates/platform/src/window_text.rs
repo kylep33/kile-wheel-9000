@@ -39,7 +39,8 @@ pub fn executable_path(window: HWND) -> Option<PathBuf> {
     let process_id = process_id(window)?;
 
     // SAFETY: the handle is closed before every return below.
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }.ok()?;
+    let process =
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }.ok()?;
 
     let mut buffer = [0u16; MAX_IMAGE_PATH_LEN];
     let mut length = buffer.len() as u32;

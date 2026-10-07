@@ -4,7 +4,8 @@ use std::f32::consts::TAU;
 
 use crate::slot::Slot;
 
-const SECTOR_RAD: f32 = TAU / Slot::COUNT as f32;
+/// One eighth of a turn, the angular width of a slot.
+pub const SECTOR_RAD: f32 = TAU / Slot::COUNT as f32;
 const HALF_SECTOR_RAD: f32 = SECTOR_RAD / 2.0;
 
 /// Cursor position relative to the wheel center, in pixels, y growing downward.
@@ -64,10 +65,19 @@ mod tests {
 
     #[test]
     fn diagonals_land_on_their_slots() {
-        assert_eq!(slot_toward(REACH_PX, -REACH_PX), Direction::NorthEast.slot());
+        assert_eq!(
+            slot_toward(REACH_PX, -REACH_PX),
+            Direction::NorthEast.slot()
+        );
         assert_eq!(slot_toward(REACH_PX, REACH_PX), Direction::SouthEast.slot());
-        assert_eq!(slot_toward(-REACH_PX, REACH_PX), Direction::SouthWest.slot());
-        assert_eq!(slot_toward(-REACH_PX, -REACH_PX), Direction::NorthWest.slot());
+        assert_eq!(
+            slot_toward(-REACH_PX, REACH_PX),
+            Direction::SouthWest.slot()
+        );
+        assert_eq!(
+            slot_toward(-REACH_PX, -REACH_PX),
+            Direction::NorthWest.slot()
+        );
     }
 
     #[test]
@@ -96,7 +106,10 @@ mod tests {
     #[test]
     fn the_dead_zone_reports_no_slot() {
         assert_eq!(slot_at(Offset::new(0.0, 0.0), HUB_RADIUS_PX), None);
-        assert_eq!(slot_at(Offset::new(0.0, -HUB_RADIUS_PX + 1.0), HUB_RADIUS_PX), None);
+        assert_eq!(
+            slot_at(Offset::new(0.0, -HUB_RADIUS_PX + 1.0), HUB_RADIUS_PX),
+            None
+        );
     }
 
     #[test]
