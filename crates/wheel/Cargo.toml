@@ -10,5 +10,10 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+anyhow.workspace = true
 kile-wheel-core.workspace = true
 kile-wheel-platform.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+windows.workspace = true
