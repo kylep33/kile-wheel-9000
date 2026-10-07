@@ -1,0 +1,29 @@
+[workspace]
+members = ["crates/core", "crates/platform", "crates/wheel"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+
+[workspace.dependencies]
+kile-wheel-core = { path = "crates/core" }
+kile-wheel-platform = { path = "crates/platform" }
+
+[workspace.lints.rust]
+# win32 callbacks are everywhere here, so every unsafe op states its own scope
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
+exhaustive_enums = "allow"
+
+# line tables keep log backtraces readable without a full debug build
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+strip = false
