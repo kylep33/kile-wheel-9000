@@ -10,7 +10,7 @@ use kile_wheel_core::config::{Config, ConfigDocument, MonitorTarget};
 use kile_wheel_core::item::{Item, ItemKind, Position};
 use kile_wheel_core::layout::SlotMemory;
 use kile_wheel_core::names::{ConfigPaths, SETTINGS_EXE};
-use kile_wheel_core::select::{self, Offset, latch};
+use kile_wheel_core::select::{self, Offset, held};
 use kile_wheel_core::slot::{Slot, Tab};
 use kile_wheel_platform::apps::{AppKey, WindowModel};
 use kile_wheel_platform::hooks::{self, HookThread, InputEvent, SharedInput};
@@ -186,11 +186,10 @@ impl App {
     fn handle(&mut self, event: InputEvent) {
         match event {
             InputEvent::Hotkey { action, seen_at } => self.handle_hotkey(action, seen_at),
-            InputEvent::Key {
-                code,
-                pressed: true,
-                ..
-            } => self.handle_key(code),
+            InputEvent::Key { code, pressed, .. } => match pressed {
+                true => self.handle_key(code),
+                false => self.handle_key_release(code),
+            },
             InputEvent::MouseMoved { x, y } => self.aim(x, y),
             InputEvent::MouseButton {
                 button: MouseButton::Left,
@@ -200,7 +199,7 @@ impl App {
                 button: MouseButton::Middle,
                 pressed: true,
             } => self.launch_new_instance(),
-            InputEvent::Key { .. } | InputEvent::MouseButton { .. } => {}
+            InputEvent::MouseButton { .. } => {}
         }
     }
 
@@ -242,10 +241,23 @@ impl App {
             return;
         }
 
-        let Some(cardinal) = latch::cardinal_for(code) else {
+        let Some(cardinal) = held::cardinal_for(code) else {
             return;
         };
         self.state.press_direction(cardinal);
+        self.redraw = true;
+    }
+
+    /// Only direction keys do anything on release; everything else acts on the press.
+    fn handle_key_release(&mut self, code: KeyCode) {
+        if !self.state.is_open() {
+            return;
+        }
+
+        let Some(cardinal) = held::cardinal_for(code) else {
+            return;
+        };
+        self.state.release_direction(cardinal);
         self.redraw = true;
     }
 

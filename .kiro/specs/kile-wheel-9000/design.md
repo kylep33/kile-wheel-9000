@@ -184,16 +184,27 @@ during phase 1 testing against a real desktop.
 
 ## Selection math
 
-### Latching
+### Direction keys
 
-One rule covers every case in the spec, which avoids a branch per transition:
+Selection follows the keys that are physically down, the way movement input usually
+does, rather than latching. Hold D for east, add W for north-east, release W and it falls
+back to east, release everything and nothing is selected.
 
-- if exactly one cardinal is latched and the pressed key is perpendicular to it, latch
-  the diagonal of the two
-- otherwise latch the pressed key alone as a cardinal
+Each axis resolves on its own and the two combine:
 
-Pressing the same key, the opposite key, or a key while a diagonal is latched all fall
-into the second case, which is what the spec asks for.
+- vertical is north when only W is down, south when only S is down, nothing when both or
+  neither are
+- horizontal is east when only D is down, west when only A is down, nothing when both or
+  neither are
+- a resolved pair is the diagonal between them; one resolved axis is that cardinal;
+  neither is no selection
+
+Press order cannot matter, because only the set of held keys is read. Key repeat cannot
+matter either, because pressing sets a flag that is already set.
+
+Mouse and keyboard mix by recording which one last moved. A key release is ignored while
+the mouse owns the selection, so letting go of a key does not yank away a pick the mouse
+just made.
 
 ### Angle
 

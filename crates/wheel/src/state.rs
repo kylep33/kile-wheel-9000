@@ -1,6 +1,6 @@
 //! What the wheel is currently showing.
 
-use kile_wheel_core::select::Latch;
+use kile_wheel_core::select::Held;
 use kile_wheel_core::slot::{Cardinal, Slot, Tab};
 use windows::Win32::Foundation::HWND;
 
@@ -11,6 +11,14 @@ pub struct WindowChoice {
     pub title: String,
 }
 
+impl PartialEq for WindowChoice {
+    fn eq(&self, other: &Self) -> bool {
+        self.handle == other.handle
+    }
+}
+
+impl Eq for WindowChoice {}
+
 /// Which layer of the wheel is in front.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Mode {
@@ -20,13 +28,14 @@ pub enum Mode {
     SubWheel { windows: Vec<WindowChoice> },
 }
 
-impl PartialEq for WindowChoice {
-    fn eq(&self, other: &Self) -> bool {
-        self.handle == other.handle
-    }
+/// Which device last set the selection. They are allowed to mix, so the last one to move
+/// owns it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Pointer {
+    #[default]
+    Keys,
+    Mouse,
 }
-
-impl Eq for WindowChoice {}
 
 /// What backing out one level did, so the caller knows whether to redraw or hide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,14 +44,15 @@ pub enum Back {
     Closed,
 }
 
-/// Selection and mode. Mouse and keyboard both write it; whichever moved last wins.
+/// Selection and mode.
 #[derive(Debug, Default)]
 pub struct WheelState {
     open: bool,
     tab: Tab,
     tab_count: usize,
     selected: Option<Slot>,
-    latch: Option<Latch>,
+    held: Held,
+    pointer: Pointer,
     mode: Mode,
     edit: bool,
     dragging: Option<Slot>,
@@ -113,26 +123,40 @@ impl WheelState {
         self.tab = tab;
         // a dragged item follows you to the new tab; otherwise the pick starts over
         if self.dragging.is_none() {
-            self.reset_selection();
+            self.selected = self.held.slot();
         }
         true
     }
 
+    /// Selection follows the keys that are down, so this is the same whether the key is
+    /// new or a key-repeat.
     pub fn press_direction(&mut self, key: Cardinal) {
-        let latch = Latch::press(self.latch, key);
-
-        self.latch = Some(latch);
-        self.selected = Some(latch.slot());
+        self.held.press(key);
+        self.pointer = Pointer::Keys;
+        self.selected = self.held.slot();
     }
 
-    /// Mouse takes the selection over, so the next direction key starts a fresh latch.
-    /// Inside the hub there is no angle to read, so the current pick stands.
+    /// Letting go falls back to whatever is still held, and letting go of everything
+    /// deselects.
+    ///
+    /// A release after the mouse has taken over only updates the held set, because
+    /// yanking the mouse's pick away would be a surprise.
+    pub fn release_direction(&mut self, key: Cardinal) {
+        self.held.release(key);
+        if self.pointer != Pointer::Keys {
+            return;
+        }
+        self.selected = self.held.slot();
+    }
+
+    /// Mouse takes the selection over. Inside the hub there is no angle to read, so the
+    /// current pick stands.
     pub fn aim_at(&mut self, slot: Option<Slot>) {
         let Some(slot) = slot else {
             return;
         };
 
-        self.latch = None;
+        self.pointer = Pointer::Mouse;
         self.selected = Some(slot);
     }
 
@@ -144,8 +168,8 @@ impl WheelState {
         self.reset_selection();
     }
 
-    /// Backs out exactly one level: sub-wheel to wheel, edit mode to normal, and from
-    /// the plain wheel all the way shut.
+    /// Backs out exactly one level: sub-wheel to wheel, edit mode to normal, and from the
+    /// plain wheel all the way shut.
     pub fn back(&mut self) -> Back {
         if self.in_sub_wheel() {
             self.mode = Mode::Wheel;
@@ -187,7 +211,8 @@ impl WheelState {
 
     fn reset_selection(&mut self) {
         self.selected = None;
-        self.latch = None;
+        self.held.clear();
+        self.pointer = Pointer::Keys;
     }
 }
 
@@ -217,14 +242,52 @@ mod tests {
     }
 
     #[test]
-    fn the_mouse_resets_the_latch_so_keys_start_over() {
+    fn selection_follows_the_keys_held_down() {
+        let mut state = opened();
+
+        state.press_direction(Cardinal::East);
+        assert_eq!(state.selected(), Some(Direction::East.slot()));
+
+        state.press_direction(Cardinal::North);
+        assert_eq!(state.selected(), Some(Direction::NorthEast.slot()));
+
+        state.release_direction(Cardinal::North);
+        assert_eq!(state.selected(), Some(Direction::East.slot()));
+
+        state.release_direction(Cardinal::East);
+        assert_eq!(state.selected(), None);
+    }
+
+    #[test]
+    fn the_mouse_takes_the_selection_over() {
+        let mut state = opened();
+        state.press_direction(Cardinal::North);
+
+        state.aim_at(Some(Direction::South.slot()));
+
+        assert_eq!(state.selected(), Some(Direction::South.slot()));
+    }
+
+    /// Releasing a key after the mouse has taken over must not yank the pick away.
+    #[test]
+    fn a_release_after_the_mouse_moved_leaves_the_pick_alone() {
         let mut state = opened();
         state.press_direction(Cardinal::North);
         state.aim_at(Some(Direction::South.slot()));
 
-        state.press_direction(Cardinal::East);
+        state.release_direction(Cardinal::North);
 
-        assert_eq!(state.selected(), Some(Direction::East.slot()));
+        assert_eq!(state.selected(), Some(Direction::South.slot()));
+    }
+
+    #[test]
+    fn a_key_press_takes_the_selection_back_from_the_mouse() {
+        let mut state = opened();
+        state.aim_at(Some(Direction::South.slot()));
+
+        state.press_direction(Cardinal::West);
+
+        assert_eq!(state.selected(), Some(Direction::West.slot()));
     }
 
     #[test]
@@ -238,13 +301,13 @@ mod tests {
     }
 
     #[test]
-    fn keys_still_latch_diagonals_through_the_state() {
+    fn opposite_keys_held_together_deselect() {
         let mut state = opened();
 
+        state.press_direction(Cardinal::North);
         state.press_direction(Cardinal::South);
-        state.press_direction(Cardinal::East);
 
-        assert_eq!(state.selected(), Some(Direction::SouthEast.slot()));
+        assert_eq!(state.selected(), None);
     }
 
     #[test]
@@ -264,14 +327,19 @@ mod tests {
         assert!(!state.select_tab(1));
     }
 
+    /// Switching tabs with nothing held leaves nothing selected on the new tab.
     #[test]
-    fn switching_tabs_clears_the_pick() {
+    fn switching_tabs_keeps_whatever_is_still_held() {
         let mut state = opened();
         state.press_direction(Cardinal::North);
+        state.release_direction(Cardinal::North);
 
         state.select_tab(2);
-
         assert_eq!(state.selected(), None);
+
+        state.press_direction(Cardinal::East);
+        state.select_tab(3);
+        assert_eq!(state.selected(), Some(Direction::East.slot()));
     }
 
     #[test]

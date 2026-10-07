@@ -63,21 +63,23 @@ aim, so that selection is a reflex instead of a task.
    slots in clockwise order.
 2. The system SHALL map W to N, D to E, S to S, A to W, and the perpendicular pairs to
    the four diagonals. Arrow keys SHALL behave the same as WASD.
-3. WHEN a single cardinal direction is latched and a perpendicular key is pressed THEN
-   the system SHALL latch the diagonal between them, in either press order.
-4. WHEN a key is pressed that is already part of the latch, or opposite a key in the
-   latch THEN the system SHALL start a fresh latch on that single cardinal direction.
-5. The system SHALL NOT require keys to be held together.
-6. WHEN Enter is pressed THEN the system SHALL activate the selected slot.
-7. The system SHALL select the slot matching the cursor's angle from the wheel center,
+3. The system SHALL select from the direction keys that are physically held, so holding
+   D selects east, adding W selects north-east, and releasing W falls back to east.
+4. WHEN every direction key is released THEN the system SHALL select nothing.
+5. WHEN two opposite direction keys are held together THEN they SHALL cancel on their own
+   axis, leaving the other axis in charge.
+6. Press order SHALL NOT matter.
+7. WHEN Enter is pressed THEN the system SHALL activate the selected slot.
+8. The system SHALL select the slot matching the cursor's angle from the wheel center,
    with no hover precision required, and SHALL ignore angle inside a center dead zone
    the size of the hub.
-8. WHEN the left mouse button is clicked THEN the system SHALL activate the selected
+9. WHEN the left mouse button is clicked THEN the system SHALL activate the selected
    slot, except on the hub cog, which SHALL open settings.
-9. WHEN `center_cursor` is enabled, which is the default, THEN the system SHALL move the
-   cursor to the wheel center on open.
-10. The system SHALL let mouse and keyboard mix freely, with the most recent input
-    owning the selection.
+10. WHEN `center_cursor` is enabled, which is the default, THEN the system SHALL move the
+    cursor to the wheel center on open.
+11. The system SHALL let mouse and keyboard mix freely, with the most recent input owning
+    the selection. A key release after the mouse has taken over SHALL NOT change the
+    selection.
 
 ---
 

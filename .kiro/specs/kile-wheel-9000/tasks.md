@@ -31,12 +31,12 @@ click activates, within the 50 ms budget.
   - Resolve `%APPDATA%` through `SHGetKnownFolderPath`, not an env var read
   - _Requirements: 7.1, 8.5_
 
-- [x] 1.3 Binding model and the latching state machine in `core`
+- [x] 1.3 Binding model and the direction-key state machine in `core`
   - Parse bindings from key, combo and mouse-button forms into a lookup table
-  - Latching reduces to the single perpendicular-or-fresh rule
-  - Unit tests for the full transition table and for angle-to-slot across all sectors
+  - Selection reads the set of keys physically held, resolving each axis on its own
+  - Unit tests for press and release sequences, and for angle-to-slot across all sectors
     plus the dead zone
-  - _Requirements: 1.2, 2.2, 2.3, 2.4, 2.5, 2.7_
+  - _Requirements: 1.2, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7_
 
 - [x] 1.4 Low-level hook thread
   - `WH_KEYBOARD_LL` and `WH_MOUSE_LL` installed on an owned thread with its own
