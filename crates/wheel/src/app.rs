@@ -23,7 +23,7 @@ use kile_wheel_platform::{activate, launch, shell, snippet};
 use tracing::{info, warn};
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, MSG, SetCursorPos, WM_TIMER,
+    DestroyWindow, DispatchMessageW, GetMessageW, MSG, SetCursorPos, WM_TIMER,
 };
 
 use crate::form::{Form, Outcome};
@@ -33,9 +33,13 @@ use crate::render::{FormView, Frame, HubView, SlotView};
 use crate::slots::{Layout, SlotEntry, SlotTarget};
 use crate::state::{Back, Mode, WheelState, WindowChoice};
 use crate::theme;
+use crate::tray::{self, Tray};
 
 /// Hotkey press to wheel visible. Spec requirement, not a nice to have.
 const OPEN_BUDGET: Duration = Duration::from_millis(50);
+
+/// What the notification area shows on hover.
+const TRAY_TOOLTIP: &str = "kile-wheel-9000";
 
 /// Hold this long on a slot or the cog to toggle edit mode.
 const EDIT_HOLD_MS: u32 = 400;
@@ -72,6 +76,9 @@ pub struct App {
     press: Option<Press>,
     /// The open petal form, which takes every key while it is up.
     form: Option<Form>,
+    /// Held so the icon is removed on the way out. Dropped after the overlay, which is
+    /// what its menu posts to.
+    _tray: Option<Tray>,
     redraw: bool,
 }
 
@@ -112,6 +119,15 @@ impl App {
             }
         };
 
+        // a tray icon that fails to appear costs the menu, not the launcher
+        let tray = match Tray::create(overlay.window(), TRAY_TOOLTIP) {
+            Ok(tray) => Some(tray),
+            Err(error) => {
+                warn!("no tray icon, so use the hotkey or the settings window: {error:#}");
+                None
+            }
+        };
+
         let mut app = Self {
             _hooks: hooks,
             shared,
@@ -127,6 +143,7 @@ impl App {
             config,
             press: None,
             form: None,
+            _tray: tray,
             redraw: false,
         };
 
@@ -184,7 +201,39 @@ impl App {
         }
         if message.message == overlay::WM_CONFIG_CHANGED {
             self.absorb_config_change();
+            return;
         }
+        if message.message == tray::WM_TRAY_COMMAND {
+            self.handle_tray_command(tray::Command::from_id(message.wParam.0));
+        }
+    }
+
+    /// A menu choice arrives here rather than running inside the menu's own message loop,
+    /// which would re-enter the app while the menu still owns the thread.
+    fn handle_tray_command(&mut self, command: Option<tray::Command>) {
+        let Some(command) = command else {
+            return;
+        };
+        info!(?command, "tray command");
+
+        match command {
+            tray::Command::OpenWheel => log_failure(self.open(None)),
+            tray::Command::Settings => log_failure(self.open_settings()),
+            tray::Command::ReloadConfig => match self.reload_config() {
+                Ok(()) => info!("reloaded the config"),
+                Err(error) => warn!("keeping the last good config: {error:#}"),
+            },
+            // the overlay's WM_DESTROY is what posts WM_QUIT, so the loop ends cleanly and
+            // the tray icon is removed on the way out
+            tray::Command::Quit => self.quit(),
+        }
+    }
+
+    fn quit(&mut self) {
+        self.close();
+
+        // SAFETY: destroys our own window, which posts WM_QUIT from its procedure.
+        let _ = unsafe { DestroyWindow(self.overlay.window()) };
     }
 
     /// A bad edit keeps the config already in memory, so a typo cannot take the wheel out.

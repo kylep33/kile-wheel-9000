@@ -12,6 +12,7 @@ pub mod render;
 pub mod slots;
 pub mod state;
 pub mod theme;
+pub mod tray;
 
 use anyhow::{Context, Result};
 use kile_wheel_core::config;
