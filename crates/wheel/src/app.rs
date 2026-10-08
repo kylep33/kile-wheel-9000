@@ -27,8 +27,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::overlay::{self, Overlay};
 use crate::render::{Frame, HubView, SlotView};
-use crate::slots::{Layout, MORE_LABEL, SlotEntry, SlotTarget};
+use crate::slots::{Layout, SlotEntry, SlotTarget};
 use crate::state::{Back, Mode, WheelState, WindowChoice};
+use crate::theme;
 
 /// Hotkey press to wheel visible. Spec requirement, not a nice to have.
 const OPEN_BUDGET: Duration = Duration::from_millis(50);
@@ -596,13 +597,19 @@ impl App {
         let slots = std::array::from_fn(|index| {
             let slot = Slot::new(index).expect("index comes from Slot::all");
             match entries[index] {
+                // an unpinned slot with nothing in it reads as empty, but keeps its glyph
+                Some(entry) if entry.is_waiting() => SlotView {
+                    label: quip_for(slot),
+                    type_glyph: Some(glyph_for(&entry.kind)),
+                    ..SlotView::default()
+                },
                 Some(entry) => SlotView {
                     label: &entry.label,
                     icon_key: entry.icon_source.as_deref(),
+                    type_glyph: Some(glyph_for(&entry.kind)),
                     running: entry.is_running(),
                     focused: entry.focused,
                     window_count: entry.windows.len(),
-                    pinned: entry.pinned,
                     filled: true,
                 },
                 None => SlotView {
@@ -627,6 +634,7 @@ impl App {
             },
             edit_mode: self.state.edit_mode(),
             dragging: self.state.dragging(),
+            overflow: self.layout.overflow(),
         })
     }
 
@@ -652,6 +660,7 @@ impl App {
             },
             edit_mode: false,
             dragging: None,
+            overflow: 0,
         })
     }
 
@@ -687,9 +696,8 @@ impl App {
     }
 
     fn activate_entry(&mut self, entry: &SlotEntry) -> Result<()> {
-        if matches!(entry.target, SlotTarget::More) {
-            // the overflow sub-wheel lands in phase 3's follow-up; closing beats a no-op
-            self.close();
+        // an unpinned slot with nothing in it has nothing to do
+        if matches!(entry.target, SlotTarget::Waiting) {
             return Ok(());
         }
 
@@ -725,7 +733,7 @@ impl App {
                     .flat_map(|group| group.windows.iter())
                     .find(|window| window.handle == *handle)
                     .map(|window| window.title.to_owned())
-                    .unwrap_or_else(|| MORE_LABEL.to_owned()),
+                    .unwrap_or_default(),
             })
             .collect()
     }
@@ -780,6 +788,11 @@ impl App {
         self.redraw = true;
         Ok(())
     }
+}
+
+/// The mini glyph that marks what a slice is.
+fn glyph_for(kind: &ItemKind) -> &'static str {
+    theme::TYPE_GLYPHS[kind.type_index()]
 }
 
 /// Turns a running app into a pinned entry, which is what dragging one does.

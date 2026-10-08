@@ -40,6 +40,10 @@ pub enum SnippetMode {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ItemKind {
+    /// A slot held open for whatever happens to be running. The wheel fills it, and the
+    /// app it picks keeps the slot until that app closes.
+    UnpinnedApp,
+
     /// Behaves like a taskbar button: launch, focus, minimize, or offer the windows.
     App {
         target: String,
@@ -83,16 +87,73 @@ pub enum ItemKind {
 }
 
 impl ItemKind {
-    /// Name shown in the settings window's type picker.
+    /// Every type, in the order the wheel and the settings window offer them.
+    pub const NAMES: [&'static str; 7] = [
+        "Unpinned app slot",
+        "Pinned app",
+        "Script",
+        "URL",
+        "Snippet",
+        "Folder",
+        "Terminal",
+    ];
+
+    /// Name shown wherever a type is picked or listed.
     pub fn type_name(&self) -> &'static str {
+        Self::NAMES[self.type_index()]
+    }
+
+    /// Position in [`Self::NAMES`], which is also the picker order.
+    pub fn type_index(&self) -> usize {
         match self {
-            Self::App { .. } => "App",
-            Self::Script { .. } => "Script",
-            Self::Url { .. } => "URL",
-            Self::Snippet { .. } => "Snippet",
-            Self::Folder { .. } => "Folder",
-            Self::Terminal { .. } => "Terminal",
+            Self::UnpinnedApp => 0,
+            Self::App { .. } => 1,
+            Self::Script { .. } => 2,
+            Self::Url { .. } => 3,
+            Self::Snippet { .. } => 4,
+            Self::Folder { .. } => 5,
+            Self::Terminal { .. } => 6,
         }
+    }
+
+    /// An empty value of the type at `type_index`, for a freshly picked slot.
+    pub fn blank(type_index: usize) -> Option<Self> {
+        let blank = match type_index {
+            0 => Self::UnpinnedApp,
+            1 => Self::App {
+                target: String::new(),
+            },
+            2 => Self::Script {
+                path: String::new(),
+                exec: SCRIPT_PRESETS[0].1.to_owned(),
+                cwd: None,
+                hidden: false,
+            },
+            3 => Self::Url {
+                url: String::new(),
+                browser: None,
+                browser_args: None,
+            },
+            4 => Self::Snippet {
+                text: String::new(),
+                mode: SnippetMode::Clipboard,
+            },
+            5 => Self::Folder {
+                path: String::new(),
+            },
+            6 => Self::Terminal {
+                profile: None,
+                distro: None,
+                cwd: None,
+            },
+            _ => return None,
+        };
+        Some(blank)
+    }
+
+    /// Whether the wheel fills this slot rather than the config.
+    pub fn is_unpinned(&self) -> bool {
+        matches!(self, Self::UnpinnedApp)
     }
 
     /// The path an automatic icon is extracted from, when there is one.
@@ -101,7 +162,7 @@ impl ItemKind {
             Self::App { target } => Some(target),
             Self::Script { path, .. } | Self::Folder { path } => Some(path),
             Self::Url { browser, .. } => browser.as_deref(),
-            Self::Snippet { .. } | Self::Terminal { .. } => None,
+            Self::UnpinnedApp | Self::Snippet { .. } | Self::Terminal { .. } => None,
         }
     }
 }

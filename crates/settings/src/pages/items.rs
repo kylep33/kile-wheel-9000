@@ -6,39 +6,6 @@ use kile_wheel_core::slot::{Slot, Tab};
 use crate::draft::slot_label;
 use crate::ui::Settings;
 
-/// Builds the starting shape for a new item of one type.
-type MakeKind = fn() -> ItemKind;
-
-/// Every type a new item can be, with what it starts out as.
-const TYPES: &[(&str, MakeKind)] = &[
-    ("App", || ItemKind::App {
-        target: String::new(),
-    }),
-    ("Script", || ItemKind::Script {
-        path: String::new(),
-        exec: SCRIPT_PRESETS[0].1.to_owned(),
-        cwd: None,
-        hidden: false,
-    }),
-    ("URL", || ItemKind::Url {
-        url: String::new(),
-        browser: None,
-        browser_args: None,
-    }),
-    ("Snippet", || ItemKind::Snippet {
-        text: String::new(),
-        mode: SnippetMode::default(),
-    }),
-    ("Folder", || ItemKind::Folder {
-        path: String::new(),
-    }),
-    ("Terminal", || ItemKind::Terminal {
-        profile: None,
-        distro: None,
-        cwd: None,
-    }),
-];
-
 /// The item being added or edited, held apart from the config so Cancel is possible.
 #[derive(Debug, Clone)]
 pub struct ItemEditor {
@@ -106,20 +73,23 @@ fn draw_add(settings: &mut Settings, ui: &mut egui::Ui) {
         return;
     };
 
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label("Add");
-        for (name, make) in TYPES {
+        for (index, name) in ItemKind::NAMES.iter().enumerate() {
             if !ui.button(*name).clicked() {
                 continue;
             }
+            let Some(kind) = ItemKind::blank(index) else {
+                continue;
+            };
             settings.editor = Some(ItemEditor {
                 index: None,
                 item: Item {
-                    name: String::new(),
+                    name: (*name).to_owned(),
                     icon: None,
                     tab: position.tab.number(),
                     slot: position.slot.index(),
-                    kind: make(),
+                    kind,
                 },
             });
         }
@@ -210,6 +180,7 @@ fn draw_common(ui: &mut egui::Ui, item: &mut Item, icons_dir: &std::path::Path) 
 
 fn draw_kind(ui: &mut egui::Ui, settings: &Settings, kind: &mut ItemKind) {
     match kind {
+        ItemKind::UnpinnedApp => draw_unpinned(ui),
         ItemKind::App { target } => draw_app(ui, target),
         ItemKind::Script {
             path,
@@ -230,6 +201,14 @@ fn draw_kind(ui: &mut egui::Ui, settings: &Settings, kind: &mut ItemKind) {
             cwd,
         } => draw_terminal(ui, settings, profile, distro, cwd),
     }
+}
+
+/// Nothing to configure: the wheel decides what sits here.
+fn draw_unpinned(ui: &mut egui::Ui) {
+    ui.label("This slot is held open for whatever happens to be running.");
+    ui.label("The app that lands here keeps the slot until it closes.");
+    ui.add_space(8.0);
+    ui.label("Add more of these to make room for more running apps.");
 }
 
 fn draw_app(ui: &mut egui::Ui, target: &mut String) {
@@ -366,12 +345,19 @@ fn name_problem(item: &Item) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// The picker reads its labels straight from core, so a blank of each type has to come
+    /// back as that same type.
     #[test]
-    fn every_type_starts_out_as_that_type() {
-        let names: Vec<&str> = TYPES.iter().map(|(_, make)| make().type_name()).collect();
-        let labels: Vec<&str> = TYPES.iter().map(|(name, _)| *name).collect();
+    fn every_type_in_the_picker_builds_itself() {
+        for (index, name) in ItemKind::NAMES.iter().enumerate() {
+            let blank = ItemKind::blank(index).expect("every listed type has a blank");
+            assert_eq!(blank.type_name(), *name);
+        }
+    }
 
-        assert_eq!(names, labels);
+    #[test]
+    fn there_is_no_type_past_the_list() {
+        assert!(ItemKind::blank(ItemKind::NAMES.len()).is_none());
     }
 
     #[test]

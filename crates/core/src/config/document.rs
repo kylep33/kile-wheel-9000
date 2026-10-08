@@ -249,6 +249,7 @@ fn set_value(table: &mut Table, key: &str, new_value: Value) {
 /// Must match the serde tag on `ItemKind`; the round-trip test below guards the pair.
 fn type_tag(kind: &ItemKind) -> &'static str {
     match kind {
+        ItemKind::UnpinnedApp => "unpinned_app",
         ItemKind::App { .. } => "app",
         ItemKind::Script { .. } => "script",
         ItemKind::Url { .. } => "url",
@@ -274,6 +275,8 @@ fn item_table(item: &Item) -> Table {
 
 fn insert_kind(table: &mut Table, kind: &ItemKind) {
     match kind {
+        // the type tag is the whole entry; the wheel decides what sits here
+        ItemKind::UnpinnedApp => {}
         ItemKind::App { target } => {
             table.insert("target", value(target.as_str()));
         }
@@ -410,6 +413,7 @@ mod tests {
     #[test]
     fn upserting_then_reading_back_round_trips_every_kind() {
         let kinds = [
+            ItemKind::UnpinnedApp,
             ItemKind::App {
                 target: "a.exe".to_owned(),
             },

@@ -58,14 +58,26 @@ name = "Main"
 # Pinned entries. Each one claims a tab and a slot.
 # Slots are numbered 0 at the top then clockwise, so 0 is N, 2 is E, 4 is S, 6 is W.
 #
-# type = "app"      target = an exe, a shortcut, or shell:AppsFolder\<AppUserModelID>
-# type = "script"   path + exec, where {path} is replaced with path
-# type = "url"      url + optional browser and browser_args
-# type = "snippet"  text, mode = "clipboard" or "type"
-# type = "folder"   path, opened in Explorer
-# type = "terminal" profile + optional distro and cwd
+# Nothing appears on the wheel unless it is listed here. Running apps only land in slots
+# you mark as "unpinned_app"; every other slot stays blank until you fill it.
+#
+# type = "unpinned_app"  a slot held open for whatever is running, filled by the wheel
+# type = "app"           target = an exe, a shortcut, or shell:AppsFolder\<AppUserModelID>
+# type = "script"        path + exec, where {path} is replaced with path
+# type = "url"           url + optional browser and browser_args
+# type = "snippet"       text, mode = "clipboard" or "type"
+# type = "folder"        path, opened in Explorer
+# type = "terminal"      profile + optional distro and cwd
 #
 # Snippets are stored here as plain text, so keep secrets out of them.
+
+# Four slots on tab 1 held open for whatever happens to be running:
+#
+# [[items]]
+# type = "unpinned_app"
+# name = "Open"
+# tab = 1
+# slot = 4
 
 # [[items]]
 # type = "app"

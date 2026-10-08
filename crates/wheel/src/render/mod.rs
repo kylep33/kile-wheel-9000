@@ -61,6 +61,9 @@ const RUNNING_PILL_HEIGHT_PX: f32 = 2.5;
 const RUNNING_PILL_GAP_PX: f32 = 5.0;
 const MULTI_WINDOW_PILL_GAP_PX: f32 = 3.0;
 
+/// Sits beside the cog, as a fraction of the hub radius.
+const OVERFLOW_X_RATIO: f32 = 0.52;
+
 const NO_MULTISAMPLING: DXGI_SAMPLE_DESC = DXGI_SAMPLE_DESC {
     Count: 1,
     Quality: 0,
@@ -72,10 +75,11 @@ pub struct SlotView<'a> {
     pub label: &'a str,
     /// Cache key of an already uploaded icon.
     pub icon_key: Option<&'a str>,
+    /// Mini glyph for the slot's type, or none for a slot the config left blank.
+    pub type_glyph: Option<&'static str>,
     pub running: bool,
     pub focused: bool,
     pub window_count: usize,
-    pub pinned: bool,
     pub filled: bool,
 }
 
@@ -95,6 +99,8 @@ pub struct Frame<'a> {
     pub hub: HubView<'a>,
     pub edit_mode: bool,
     pub dragging: Option<Slot>,
+    /// How many running apps had no unpinned slot to land in.
+    pub overflow: usize,
 }
 
 /// The GPU side of the overlay.
@@ -399,11 +405,11 @@ impl Renderer {
         label_centre: Vector2,
         view: SlotView<'_>,
     ) {
-        if view.pinned {
+        if let Some(glyph) = view.type_glyph {
             let at = on_circle(centre, self.metrics.pin_radius_px, bearing);
             let box_px = self.metrics.number_size_px * 2.0;
             self.draw_text(
-                theme::PIN_GLYPH,
+                glyph,
                 box_around(at, box_px, box_px),
                 self.fonts.glyph(),
                 &self.palette.accent,
@@ -500,6 +506,27 @@ impl Renderer {
             theme::COG_GLYPH,
             self.fonts.cog(),
             &self.palette.accent_dim,
+        );
+
+        self.draw_overflow(centre, frame.overflow);
+    }
+
+    /// Only drawn when apps outnumber the unpinned slots, so its presence is the message.
+    fn draw_overflow(&self, centre: Vector2, overflow: usize) {
+        if overflow == 0 {
+            return;
+        }
+
+        let at = Vector2 {
+            X: centre.X + self.metrics.hub_radius_px * OVERFLOW_X_RATIO,
+            Y: centre.Y + self.metrics.cog_offset_px(),
+        };
+        let box_px = self.metrics.cog_size_px * 2.0;
+        self.draw_text(
+            theme::OVERFLOW_GLYPH,
+            box_around(at, box_px, box_px),
+            self.fonts.cog(),
+            &self.palette.accent,
         );
     }
 

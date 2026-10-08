@@ -1,43 +1,51 @@
-//! What each wheel slot holds, and how running apps fill the gaps around pinned items.
+//! What each wheel slot holds.
+//!
+//! Nothing appears unless the config puts it there. Running apps only land in slots
+//! marked as unpinned app slots, so a blank slot stays blank.
 
-use std::collections::HashSet;
 use std::path::Path;
 
 use kile_wheel_core::config::Config;
 use kile_wheel_core::item::{Item, ItemKind, Position};
-use kile_wheel_core::layout::{self, SlotMemory};
+use kile_wheel_core::layout::SlotMemory;
 use kile_wheel_core::slot::{Slot, Tab};
 use kile_wheel_platform::apps::{AppGroup, AppKey, WindowModel};
 use kile_wheel_platform::paths::expand;
 use windows::Win32::Foundation::HWND;
 
-/// Shown in the last slot of the last tab when everything else is full.
-pub const MORE_LABEL: &str = "More...";
-
 /// What activating a slot does.
 #[derive(Debug, Clone)]
 pub enum SlotTarget {
+    /// A configured entry that launches, focuses or pastes.
     Pinned(Item),
+    /// A running app sitting in an unpinned app slot.
     Running(AppKey),
-    /// Everything that did not fit anywhere.
-    More,
+    /// An unpinned app slot with nothing in it yet.
+    Waiting,
 }
 
-/// One filled slot.
+/// One slot the config has given a purpose.
 #[derive(Debug, Clone)]
 pub struct SlotEntry {
     pub label: String,
     /// What the icon is extracted from, which doubles as its cache key.
     pub icon_source: Option<String>,
+    /// The configured type, which is what picks the slice's mini glyph.
+    pub kind: ItemKind,
     pub target: SlotTarget,
     pub windows: Vec<HWND>,
     pub focused: bool,
-    pub pinned: bool,
 }
 
 impl SlotEntry {
     pub fn is_running(&self) -> bool {
         !self.windows.is_empty()
+    }
+
+    /// An unpinned slot waiting for an app reads as empty, so it gets a quip rather than
+    /// a name, while keeping its glyph so you can see it is spoken for.
+    pub fn is_waiting(&self) -> bool {
+        matches!(self.target, SlotTarget::Waiting)
     }
 }
 
@@ -45,50 +53,39 @@ impl SlotEntry {
 #[derive(Debug, Default)]
 pub struct Layout {
     tabs: Vec<Vec<Option<SlotEntry>>>,
+    overflow: usize,
 }
 
 impl Layout {
-    /// Pinned items take their configured slots; running apps fill what is left, keeping
-    /// whatever slot they already held.
     pub fn build(config: &Config, model: &WindowModel, memory: &mut SlotMemory<AppKey>) -> Self {
         let pinned = config.pinned();
         let groups = model.groups();
         let focused = model.focused_key();
 
-        let unpinned: Vec<AppKey> = groups
+        let open_slots = unpinned_slots(config);
+        let spare: Vec<AppKey> = groups
             .iter()
             .filter(|group| !pinned.values().any(|item| matches_app(item, group.key)))
             .map(|group| group.key.clone())
             .collect();
 
-        let tab_count = needed_tabs(config, pinned.len(), unpinned.len());
-        let reserved: HashSet<Position> = pinned.keys().copied().collect();
-        let overflowed = memory.reconcile(&unpinned, &reserved, tab_count);
-
+        let overflow = memory.reconcile(&spare, &open_slots);
+        let tab_count = config.tab_count();
         let mut tabs = vec![vec![None; Slot::COUNT]; tab_count];
 
-        for position in layout::positions(tab_count) {
-            let entry = if let Some(item) = pinned.get(&position) {
-                Some(pinned_entry(item, model, focused))
-            } else if let Some(key) = memory.at(position) {
-                groups
-                    .iter()
-                    .find(|group| group.key == key)
-                    .map(|group| running_entry(group, focused))
-            } else {
-                None
-            };
-
-            if let Some(entry) = entry {
-                tabs[position.tab.index()][position.slot.index()] = Some(entry);
+        for (position, item) in pinned {
+            if position.tab.index() >= tab_count {
+                continue;
             }
+
+            let entry = match item.kind.is_unpinned() {
+                true => unpinned_entry(position, memory, &groups, focused),
+                false => pinned_entry(item, &groups, focused),
+            };
+            tabs[position.tab.index()][position.slot.index()] = Some(entry);
         }
 
-        if !overflowed.is_empty() {
-            place_more(&mut tabs, tab_count);
-        }
-
-        Self { tabs }
+        Self { tabs, overflow }
     }
 
     pub fn get(&self, tab: Tab, slot: Slot) -> Option<&SlotEntry> {
@@ -96,75 +93,79 @@ impl Layout {
     }
 
     pub fn tab_count(&self) -> usize {
-        self.tabs.len()
+        self.tabs.len().max(1)
+    }
+
+    /// How many running apps had nowhere to go.
+    pub fn overflow(&self) -> usize {
+        self.overflow
     }
 }
 
-/// Enough tabs for everything, capped at what the number keys can reach.
-///
-/// Pinned items can sit anywhere, so this counts them rather than packing them, which
-/// errs on the side of one extra tab rather than hiding an app.
-fn needed_tabs(config: &Config, pinned: usize, unpinned: usize) -> usize {
-    let wanted = (pinned + unpinned).div_ceil(Slot::COUNT).max(1);
+/// The unpinned app slots, in the order they fill.
+fn unpinned_slots(config: &Config) -> Vec<Position> {
+    let mut slots: Vec<Position> = config
+        .items
+        .iter()
+        .filter(|item| item.kind.is_unpinned())
+        .filter_map(Item::position)
+        .collect();
 
-    config.tab_count().max(wanted).min(Tab::MAX_COUNT)
+    slots.sort();
+    slots
 }
 
-fn place_more(tabs: &mut [Vec<Option<SlotEntry>>], tab_count: usize) {
-    let Some(position) = layout::overflow_position(tab_count) else {
-        return;
+fn unpinned_entry(
+    position: Position,
+    memory: &SlotMemory<AppKey>,
+    groups: &[AppGroup<'_>],
+    focused: Option<&AppKey>,
+) -> SlotEntry {
+    let group = memory
+        .at(position)
+        .and_then(|key| groups.iter().find(|group| group.key == key));
+
+    let Some(group) = group else {
+        return SlotEntry {
+            label: String::new(),
+            icon_source: None,
+            kind: ItemKind::UnpinnedApp,
+            target: SlotTarget::Waiting,
+            windows: Vec::new(),
+            focused: false,
+        };
     };
 
-    tabs[position.tab.index()][position.slot.index()] = Some(SlotEntry {
-        label: MORE_LABEL.to_owned(),
-        icon_source: None,
-        target: SlotTarget::More,
-        windows: Vec::new(),
-        focused: false,
-        pinned: false,
-    });
+    SlotEntry {
+        label: group_label(group),
+        icon_source: Some(icon_path(group.key)),
+        kind: ItemKind::UnpinnedApp,
+        target: SlotTarget::Running(group.key.clone()),
+        windows: group.windows.iter().map(|window| window.handle).collect(),
+        focused: focused == Some(group.key),
+    }
 }
 
 /// A pinned app shows the windows it already has open, so it behaves like the taskbar
 /// rather than appearing twice.
-fn pinned_entry(item: &Item, model: &WindowModel, focused: Option<&AppKey>) -> SlotEntry {
-    let group = model
-        .groups()
-        .into_iter()
-        .find(|group| matches_app(item, group.key));
-
-    let windows = group
-        .as_ref()
-        .map(|group| group.windows.iter().map(|window| window.handle).collect())
-        .unwrap_or_default();
-    let is_focused = group
-        .as_ref()
-        .is_some_and(|group| Some(group.key) == focused);
+fn pinned_entry(item: &Item, groups: &[AppGroup<'_>], focused: Option<&AppKey>) -> SlotEntry {
+    let group = groups.iter().find(|group| matches_app(item, group.key));
 
     SlotEntry {
         label: item.name.clone(),
         icon_source: icon_source(item),
+        kind: item.kind.clone(),
         target: SlotTarget::Pinned(item.clone()),
-        windows,
-        focused: is_focused,
-        pinned: true,
+        windows: group
+            .map(|group| group.windows.iter().map(|window| window.handle).collect())
+            .unwrap_or_default(),
+        focused: group.is_some_and(|group| focused == Some(group.key)),
     }
 }
 
-fn running_entry(group: &AppGroup<'_>, focused: Option<&AppKey>) -> SlotEntry {
-    SlotEntry {
-        label: group_label(group),
-        icon_source: Some(icon_path(group.key)),
-        target: SlotTarget::Running(group.key.clone()),
-        windows: group.windows.iter().map(|window| window.handle).collect(),
-        focused: focused == Some(group.key),
-        pinned: false,
-    }
-}
-
-/// The icon comes from the item's own target, or from a user-supplied image when one is
-/// configured. The config path is relative to the config folder, so the caller resolves
-/// it before handing it over.
+/// The icon comes from a user-supplied image when one is configured, otherwise from the
+/// item's own target. A configured path is relative to the config folder, so the caller
+/// resolves it before handing it over.
 fn icon_source(item: &Item) -> Option<String> {
     if let Some(icon) = &item.icon {
         return Some(icon.clone());
@@ -216,7 +217,6 @@ fn matches_app(item: &Item, key: &AppKey) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kile_wheel_core::config::Config;
 
     fn app_item(name: &str, target: &str, tab: usize, slot: usize) -> Item {
         Item {
@@ -230,12 +230,51 @@ mod tests {
         }
     }
 
+    fn unpinned(tab: usize, slot: usize) -> Item {
+        Item {
+            name: "Open".to_owned(),
+            icon: None,
+            tab,
+            slot,
+            kind: ItemKind::UnpinnedApp,
+        }
+    }
+
     fn group<'a>(key: &'a AppKey, executable: Option<&'a Path>) -> AppGroup<'a> {
         AppGroup {
             key,
             executable,
             windows: Vec::new(),
         }
+    }
+
+    #[test]
+    fn unpinned_slots_come_out_in_tab_then_slot_order() {
+        let config = Config {
+            items: vec![unpinned(2, 1), unpinned(1, 6), unpinned(1, 2)],
+            ..Config::default()
+        };
+
+        let slots: Vec<(usize, usize)> = unpinned_slots(&config)
+            .into_iter()
+            .map(|position| (position.tab.number(), position.slot.index()))
+            .collect();
+        assert_eq!(slots, [(1, 2), (1, 6), (2, 1)]);
+    }
+
+    #[test]
+    fn pinned_entries_are_not_unpinned_slots() {
+        let config = Config {
+            items: vec![app_item("Code", "code.exe", 1, 0), unpinned(1, 1)],
+            ..Config::default()
+        };
+
+        assert_eq!(unpinned_slots(&config).len(), 1);
+    }
+
+    #[test]
+    fn an_empty_config_opens_no_slots() {
+        assert!(unpinned_slots(&Config::default()).is_empty());
     }
 
     #[test]
@@ -268,19 +307,10 @@ mod tests {
     }
 
     #[test]
-    fn a_non_app_item_never_matches_a_running_group() {
-        let item = Item {
-            name: "Projects".to_owned(),
-            icon: None,
-            tab: 1,
-            slot: 0,
-            kind: ItemKind::Folder {
-                path: r"C:\p".to_owned(),
-            },
-        };
-        let key = AppKey::Executable(r"C:\p".into());
+    fn an_unpinned_slot_never_matches_a_running_group() {
+        let key = AppKey::Executable(r"C:\Apps\Code.exe".into());
 
-        assert!(!matches_app(&item, &key));
+        assert!(!matches_app(&unpinned(1, 0), &key));
     }
 
     #[test]
@@ -299,19 +329,8 @@ mod tests {
     }
 
     #[test]
-    fn a_snippet_has_no_icon_to_extract() {
-        let item = Item {
-            name: "Sig".to_owned(),
-            icon: None,
-            tab: 1,
-            slot: 0,
-            kind: ItemKind::Snippet {
-                text: "hi".to_owned(),
-                mode: Default::default(),
-            },
-        };
-
-        assert_eq!(icon_source(&item), None);
+    fn an_unpinned_slot_has_no_icon_of_its_own() {
+        assert_eq!(icon_source(&unpinned(1, 0)), None);
     }
 
     #[test]
@@ -343,22 +362,5 @@ mod tests {
         let key = AppKey::UserModelId("Some.App_abc!App".to_owned());
 
         assert_eq!(icon_path(&key), r"shell:AppsFolder\Some.App_abc!App");
-    }
-
-    #[test]
-    fn one_tab_is_enough_for_an_empty_config() {
-        assert_eq!(needed_tabs(&Config::default(), 0, 0), 1);
-    }
-
-    #[test]
-    fn more_apps_than_one_tab_holds_grows_the_tab_count() {
-        assert_eq!(needed_tabs(&Config::default(), 0, Slot::COUNT + 1), 2);
-    }
-
-    #[test]
-    fn the_tab_count_never_passes_the_number_keys() {
-        let crowded = Slot::COUNT * (Tab::MAX_COUNT + 4);
-
-        assert_eq!(needed_tabs(&Config::default(), 0, crowded), Tab::MAX_COUNT);
     }
 }

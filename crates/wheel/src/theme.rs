@@ -49,8 +49,23 @@ pub const LOCALE: &str = "en-us";
 /// Settings gear in Segoe MDL2 Assets.
 pub const COG_GLYPH: &str = "\u{E713}";
 
-/// Pin glyph for a slot that is pinned rather than merely running.
-pub const PIN_GLYPH: &str = "\u{E718}";
+/// Mini glyph per slot type, in `ItemKind::NAMES` order. Segoe MDL2 Assets codepoints,
+/// listed so they are easy to swap.
+pub const TYPE_GLYPHS: [&str; 7] = [
+    "\u{E7C4}", // unpinned app slot: switch apps
+    "\u{E718}", // pinned app: pin
+    "\u{E943}", // script: code
+    "\u{E774}", // url: globe
+    "\u{E77F}", // snippet: paste
+    "\u{E8B7}", // folder
+    "\u{E756}", // terminal: command prompt
+];
+
+/// Shown in the hub when more apps are running than there are unpinned slots.
+pub const OVERFLOW_GLYPH: &str = "\u{E946}";
+
+/// Shown on a slice in edit mode, to clear the slot.
+pub const DELETE_GLYPH: &str = "\u{E74D}";
 
 /// Shown on the hub while edit mode is on.
 pub const EDIT_LABEL: &str = "EDIT";

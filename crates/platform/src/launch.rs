@@ -21,6 +21,9 @@ pub enum LaunchError {
 
     #[error("a snippet is typed into the focused window rather than launched")]
     NotLaunchable,
+
+    #[error("an unpinned app slot holds whatever is running, so there is nothing to launch")]
+    NothingToLaunch,
 }
 
 /// How a launch reaches the shell.
@@ -68,6 +71,7 @@ fn plan(kind: &ItemKind) -> Result<Launch, LaunchError> {
             cwd.as_deref(),
         )),
         ItemKind::Snippet { .. } => Err(LaunchError::NotLaunchable),
+        ItemKind::UnpinnedApp => Err(LaunchError::NothingToLaunch),
     }
 }
 

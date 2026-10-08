@@ -438,6 +438,12 @@ mod tests {
     fn every_item_type_parses_from_the_flat_shape() {
         let text = r#"
             [[items]]
+            type = "unpinned_app"
+            name = "Open slot"
+            tab = 1
+            slot = 7
+
+            [[items]]
             type = "app"
             name = "Code"
             target = "C:\\code.exe"
@@ -494,9 +500,25 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            ["App", "Script", "URL", "Snippet", "Folder", "Terminal"]
+            [
+                "Unpinned app slot",
+                "Pinned app",
+                "Script",
+                "URL",
+                "Snippet",
+                "Folder",
+                "Terminal"
+            ]
         );
         config.validate().expect("positions are all distinct");
+    }
+
+    /// Nothing fills a slot you did not ask to be filled.
+    #[test]
+    fn the_shipped_default_pins_nothing_and_opens_no_slots() {
+        let config: Config = toml::from_str(DEFAULT_CONFIG).expect("the default must parse");
+
+        assert!(config.items.is_empty());
     }
 
     #[test]
