@@ -122,9 +122,14 @@ impl Metrics {
         }
     }
 
-    /// Square window side in pixels, leaving room for the outer stroke.
+    /// Square window side in pixels.
+    ///
+    /// Sized for the furthest a petal form can reach, not just the wheel, because a panel
+    /// drawn outside the window is simply clipped away.
     pub fn window_size_px(self) -> i32 {
-        ((self.radius_px + WINDOW_MARGIN_PX) * 2.0).ceil() as i32
+        let reach = self.radius_px * crate::form::PETAL_MAX_REACH_RATIO;
+
+        ((reach + WINDOW_MARGIN_PX) * 2.0).ceil() as i32
     }
 
     /// Distance from the wheel centre at which selection starts, matching the hub.
@@ -281,11 +286,14 @@ mod tests {
         assert!(metrics.label_radius_px < metrics.radius_px);
     }
 
+    /// A clipped panel would be the whole point of the petal lost, so the window has to
+    /// cover the furthest one can reach.
     #[test]
-    fn the_window_leaves_room_for_the_outer_stroke() {
+    fn the_window_covers_the_furthest_a_petal_reaches() {
         let metrics = Metrics::new(USER_DEFAULT_DPI, 1.0);
+        let reach = metrics.radius_px * crate::form::PETAL_MAX_REACH_RATIO;
 
-        assert!(metrics.window_size_px() as f32 > metrics.radius_px * 2.0);
+        assert!(metrics.window_size_px() as f32 >= reach * 2.0);
     }
 
     #[test]

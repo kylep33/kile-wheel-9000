@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::Local;
-use kile_wheel_core::binding::{Action, KeyCode, MouseButton, keys};
+use kile_wheel_core::binding::{Action, KeyCode, Modifiers, MouseButton, keys};
 use kile_wheel_core::config::{Config, ConfigDocument, MonitorTarget};
 use kile_wheel_core::item::{Item, ItemKind, Position};
 use kile_wheel_core::layout::SlotMemory;
@@ -13,6 +13,7 @@ use kile_wheel_core::names::{ConfigPaths, SETTINGS_EXE};
 use kile_wheel_core::select::{self, Offset, held};
 use kile_wheel_core::slot::{Slot, Tab};
 use kile_wheel_platform::apps::{AppKey, WindowModel};
+use kile_wheel_platform::clipboard;
 use kile_wheel_platform::config_watch::ConfigWatcher;
 use kile_wheel_platform::hooks::{self, HookThread, InputEvent, SharedInput};
 use kile_wheel_platform::icons::IconCache;
@@ -25,8 +26,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, MSG, SetCursorPos, WM_TIMER,
 };
 
+use crate::form::{Form, Outcome};
+use crate::keyboard::printable;
 use crate::overlay::{self, Overlay};
-use crate::render::{Frame, HubView, SlotView};
+use crate::render::{FormView, Frame, HubView, SlotView};
 use crate::slots::{Layout, SlotEntry, SlotTarget};
 use crate::state::{Back, Mode, WheelState, WindowChoice};
 use crate::theme;
@@ -36,6 +39,9 @@ const OPEN_BUDGET: Duration = Duration::from_millis(50);
 
 /// Hold this long on a slot or the cog to toggle edit mode.
 const EDIT_HOLD_MS: u32 = 400;
+
+/// Roughly one frame at 60Hz, for driving the form's open animation.
+const FRAME_MS: u32 = 16;
 
 const CLOCK_FORMAT: &str = "%H:%M";
 const DATE_FORMAT: &str = "%a %d %b";
@@ -64,6 +70,8 @@ pub struct App {
     paths: ConfigPaths,
     config: Config,
     press: Option<Press>,
+    /// The open petal form, which takes every key while it is up.
+    form: Option<Form>,
     redraw: bool,
 }
 
@@ -118,6 +126,7 @@ impl App {
             paths,
             config,
             press: None,
+            form: None,
             redraw: false,
         };
 
@@ -162,7 +171,15 @@ impl App {
             return;
         }
         if message.message == WM_TIMER {
-            self.hold_elapsed();
+            match message.wParam.0 {
+                // the tick re-checks the clock so the last frame of the growth also
+                // stops the timer, instead of redrawing a settled petal forever
+                overlay::FRAME_TIMER => {
+                    self.redraw = true;
+                    self.drive_animation();
+                }
+                _ => self.hold_elapsed(),
+            }
             return;
         }
         if message.message == overlay::WM_CONFIG_CHANGED {
@@ -217,13 +234,18 @@ impl App {
         self.redraw = false;
         let drawn = self.draw();
         log_failure(drawn);
+        self.drive_animation();
     }
 
     fn handle(&mut self, event: InputEvent) {
         match event {
             InputEvent::Hotkey { action, seen_at } => self.handle_hotkey(action, seen_at),
-            InputEvent::Key { code, pressed, .. } => match pressed {
-                true => self.handle_key(code),
+            InputEvent::Key {
+                code,
+                modifiers,
+                pressed,
+            } => match pressed {
+                true => self.handle_key(code, modifiers, printable(code, modifiers)),
                 false => self.handle_key_release(code),
             },
             InputEvent::MouseMoved { x, y } => self.aim(x, y),
@@ -252,15 +274,24 @@ impl App {
         }
     }
 
-    fn handle_key(&mut self, code: KeyCode) {
+    fn handle_key(&mut self, code: KeyCode, modifiers: Modifiers, typed: Option<char>) {
         // Esc is handled before the open check on purpose: it is the way out if the state
         // and the hook ever disagree about whether the wheel is up, and the hook is what
         // decides whether your keys reach anything.
         if code == keys::ESC {
-            self.close();
+            match self.form.is_some() {
+                true => self.close_form(),
+                false => self.close(),
+            }
             return;
         }
         if !self.state.is_open() {
+            return;
+        }
+
+        // a form takes every other key, so Backspace edits a field instead of backing out
+        if self.form.is_some() {
+            self.handle_form_key(code, modifiers, typed);
             return;
         }
 
@@ -284,6 +315,105 @@ impl App {
         };
         self.state.press_direction(cardinal);
         self.redraw = true;
+    }
+
+    /// Routes a key into the open form and acts on what it decided.
+    fn handle_form_key(&mut self, code: KeyCode, modifiers: Modifiers, typed: Option<char>) {
+        let Some(form) = &mut self.form else {
+            return;
+        };
+
+        // the clipboard is only read when a paste is actually asked for
+        let clipboard = match modifiers.ctrl && code == keys::V {
+            true => clipboard::read_text(),
+            false => None,
+        };
+
+        let outcome = form.press(code, modifiers, typed, clipboard.as_deref());
+        match outcome {
+            Outcome::Ignored => {}
+            Outcome::Redraw => self.redraw = true,
+            Outcome::Cancel => self.close_form(),
+            Outcome::Delete => {
+                let cleared = self.clear_slot();
+                log_failure(cleared);
+                self.close_form();
+            }
+            Outcome::Commit(item) => {
+                let saved = self.save_item(&item);
+                log_failure(saved);
+                self.close_form();
+            }
+        }
+    }
+
+    /// Opens the form on whatever the selected slot holds, or on the type picker when it
+    /// holds nothing.
+    fn open_form(&mut self) {
+        let Some(slot) = self.state.selected() else {
+            return;
+        };
+        let tab = self.state.tab();
+
+        self.form = Some(match self.layout.get(tab, slot) {
+            Some(entry) => match &entry.target {
+                SlotTarget::Pinned(item) => Form::editing(tab, slot, item),
+                // a running app or an empty unpinned slot is still an unpinned slot entry
+                _ => Form::editing(tab, slot, &unpinned_item(tab, slot)),
+            },
+            None => Form::picking(tab, slot),
+        });
+        self.redraw = true;
+        self.drive_animation();
+    }
+
+    fn close_form(&mut self) {
+        self.form = None;
+        self.overlay.stop_frame_timer();
+        self.redraw = true;
+    }
+
+    /// Keeps frames coming while the petal is still growing, then stops.
+    fn drive_animation(&mut self) {
+        let duration_ms = self.config.wheel.animation.duration_ms();
+        let animating = self
+            .form
+            .as_ref()
+            .is_some_and(|form| form.animating(duration_ms));
+
+        match animating {
+            true => self.overlay.start_frame_timer(FRAME_MS),
+            false => self.overlay.stop_frame_timer(),
+        }
+    }
+
+    fn save_item(&mut self, item: &Item) -> Result<()> {
+        let mut document = ConfigDocument::load(&self.paths.config_file())
+            .context("could not open the config to save the slot")?;
+
+        document.upsert_item(item)?;
+        document.save().context("could not save the slot")?;
+        info!(name = %item.name, kind = item.kind.type_name(), "saved a slot");
+        self.reload_config()
+    }
+
+    fn clear_slot(&mut self) -> Result<()> {
+        let Some(form) = &self.form else {
+            return Ok(());
+        };
+        let position = Position::new(form.tab(), form.slot());
+
+        let mut document = ConfigDocument::load(&self.paths.config_file())
+            .context("could not open the config to clear the slot")?;
+
+        if !document.remove_item_at(position) {
+            info!(at = %describe(position), "that slot was already empty");
+            return Ok(());
+        }
+
+        document.save().context("could not save the cleared slot")?;
+        info!(at = %describe(position), "cleared a slot");
+        self.reload_config()
     }
 
     /// Only direction keys do anything on release; everything else acts on the press.
@@ -319,7 +449,7 @@ impl App {
     }
 
     fn handle_left_button(&mut self, pressed: bool) {
-        if !self.state.is_open() {
+        if !self.state.is_open() || self.form.is_some() {
             return;
         }
 
@@ -362,6 +492,7 @@ impl App {
         }
 
         if press.on_cog {
+            // the hub holds no item, so there is nothing for the petal form to edit here
             log_failure(self.open_settings());
             return;
         }
@@ -388,8 +519,11 @@ impl App {
         self.redraw = true;
     }
 
+    /// A press and release on the same slot is a click, which opens the form. Landing
+    /// somewhere else is a drag, which moves the slot.
     fn finish_drag(&mut self) {
         let Some(from_slot) = self.state.end_drag() else {
+            self.open_form();
             return;
         };
         self.redraw = true;
@@ -397,6 +531,11 @@ impl App {
         let Some(to_slot) = self.state.selected() else {
             return;
         };
+        if from_slot == to_slot {
+            self.open_form();
+            return;
+        }
+
         let tab = self.state.tab();
         let moved = self.move_item(Position::new(tab, from_slot), Position::new(tab, to_slot));
         log_failure(moved);
@@ -524,6 +663,8 @@ impl App {
     /// believing the wheel was open, which swallowed every key until the next open.
     fn close(&mut self) {
         self.overlay.stop_hold_timer();
+        self.overlay.stop_frame_timer();
+        self.form = None;
         self.press = None;
         self.shared.set_wheel_open(false);
         self.state.close();
@@ -588,7 +729,24 @@ impl App {
         }
     }
 
+    /// The lines of the open form, kept alive by the caller so the view can borrow them.
+    fn form_lines(&self) -> Vec<crate::form::Line> {
+        self.form.as_ref().map(Form::lines).unwrap_or_default()
+    }
+
+    fn form_view<'a>(&'a self, lines: &'a [crate::form::Line]) -> Option<FormView<'a>> {
+        let form = self.form.as_ref()?;
+
+        Some(FormView {
+            slot: form.slot(),
+            title: form.title(),
+            lines,
+            progress: form.progress(self.config.wheel.animation.duration_ms()),
+        })
+    }
+
     fn draw_wheel(&self) -> Result<()> {
+        let lines = self.form_lines();
         let tab = self.state.tab();
         let entries: Vec<Option<&SlotEntry>> =
             Slot::all().map(|slot| self.layout.get(tab, slot)).collect();
@@ -635,6 +793,7 @@ impl App {
             edit_mode: self.state.edit_mode(),
             dragging: self.state.dragging(),
             overflow: self.layout.overflow(),
+            form: self.form_view(&lines),
         })
     }
 
@@ -661,6 +820,7 @@ impl App {
             edit_mode: false,
             dragging: None,
             overflow: 0,
+            form: None,
         })
     }
 
@@ -787,6 +947,17 @@ impl App {
         self.layout = Layout::build(&self.config, &self.model, &mut self.memory);
         self.redraw = true;
         Ok(())
+    }
+}
+
+/// A slot the config marked unpinned, rebuilt so the form can edit it.
+fn unpinned_item(tab: Tab, slot: Slot) -> Item {
+    Item {
+        name: "Open".to_owned(),
+        icon: None,
+        tab: tab.number(),
+        slot: slot.index(),
+        kind: ItemKind::UnpinnedApp,
     }
 }
 

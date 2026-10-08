@@ -26,8 +26,12 @@ pub const WM_OPEN_WHEEL: u32 = WM_APP + 2;
 /// Posted by the config watcher when the file on disk changed.
 pub const WM_CONFIG_CHANGED: u32 = WM_APP + 3;
 
-/// The one timer this window uses, for the click-and-hold that toggles edit mode.
+/// The one timer this window uses for the click-and-hold that toggles edit mode.
 const HOLD_TIMER: usize = 1;
+
+/// Drives the form's open animation, which has no input to ride along with. Public so the
+/// message loop can tell this timer from the hold one without a second copy of the id.
+pub const FRAME_TIMER: usize = 2;
 
 /// The hidden topmost window and the GPU resources behind it.
 #[derive(Debug)]
@@ -136,6 +140,18 @@ impl Overlay {
     pub fn stop_hold_timer(&self) {
         // SAFETY: killing a timer that is not running just fails.
         let _ = unsafe { KillTimer(Some(self.window), HOLD_TIMER) };
+    }
+
+    /// Ticks while something is animating. Without it an animation would stall, because the
+    /// message loop only wakes for input.
+    pub fn start_frame_timer(&self, every_ms: u32) {
+        // SAFETY: targets our own window with no callback, so the message loop gets it.
+        unsafe { SetTimer(Some(self.window), FRAME_TIMER, every_ms, None) };
+    }
+
+    pub fn stop_frame_timer(&self) {
+        // SAFETY: killing a timer that is not running just fails.
+        let _ = unsafe { KillTimer(Some(self.window), FRAME_TIMER) };
     }
 }
 

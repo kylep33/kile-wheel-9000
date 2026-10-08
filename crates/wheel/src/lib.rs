@@ -4,6 +4,8 @@
 //! can be unit tested without the elevation the binary's manifest asks for.
 
 pub mod app;
+pub mod form;
+pub mod keyboard;
 pub mod logging;
 pub mod overlay;
 pub mod render;

@@ -4,7 +4,8 @@
 //! composites on the GPU and handles premultiplied alpha itself, so the overlay gets
 //! real per-pixel transparency with no blit.
 
-mod geometry;
+mod form;
+pub mod geometry;
 mod icons;
 mod text;
 
@@ -41,9 +42,11 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::core::{Interface, Result};
 use windows_numerics::Vector2;
 
+use crate::form::{Line, Petal, RowValue};
 use crate::theme::{self, Metrics, Palette};
 use geometry::{Wedges, on_circle, slot_bearing_rad, slot_edge_rad};
 use text::Fonts;
+use windows::Win32::Graphics::DirectWrite::IDWriteFactory;
 
 /// Two buffers is the minimum the flip model accepts, and all the overlay needs.
 const BUFFER_COUNT: u32 = 2;
@@ -63,6 +66,16 @@ const MULTI_WINDOW_PILL_GAP_PX: f32 = 3.0;
 
 /// Sits beside the cog, as a fraction of the hub radius.
 const OVERFLOW_X_RATIO: f32 = 0.52;
+
+/// How much of a form row the label column takes.
+const FORM_LABEL_RATIO: f32 = 0.38;
+
+/// Text only appears once the panel has room for it, so it never spills outside.
+const FORM_TEXT_THRESHOLD: f32 = 0.55;
+
+const FORM_EDGE_MARGIN_PX: f32 = 6.0;
+const CARET_WIDTH_PX: f32 = 1.6;
+const CARET_INSET_PX: f32 = 3.0;
 
 const NO_MULTISAMPLING: DXGI_SAMPLE_DESC = DXGI_SAMPLE_DESC {
     Count: 1,
@@ -101,6 +114,17 @@ pub struct Frame<'a> {
     pub dragging: Option<Slot>,
     /// How many running apps had no unpinned slot to land in.
     pub overflow: usize,
+    /// The open form, if there is one.
+    pub form: Option<FormView<'a>>,
+}
+
+/// One open petal form, ready to draw.
+#[derive(Debug)]
+pub struct FormView<'a> {
+    pub slot: Slot,
+    pub title: &'a str,
+    pub lines: &'a [Line],
+    pub progress: f32,
 }
 
 /// The GPU side of the overlay.
@@ -111,6 +135,7 @@ pub struct Renderer {
     swap_chain: IDXGISwapChain1,
     brush: ID2D1SolidColorBrush,
     fonts: Fonts,
+    text_factory: IDWriteFactory,
     wedges: Wedges,
     icons: HashMap<String, ID2D1Bitmap1>,
     size_px: u32,
@@ -156,8 +181,11 @@ impl Renderer {
 
         let wedges = Wedges::build(&factory, centre_of(size_px), metrics)?;
 
+        let (fonts, text_factory) = Fonts::new(metrics)?;
+
         Ok(Self {
-            fonts: Fonts::new(metrics)?,
+            fonts,
+            text_factory,
             factory,
             context,
             swap_chain,
@@ -213,7 +241,9 @@ impl Renderer {
 
         self.size_px = size_px;
         self.metrics = metrics;
-        self.fonts = Fonts::new(metrics)?;
+        let (fonts, text_factory) = Fonts::new(metrics)?;
+        self.fonts = fonts;
+        self.text_factory = text_factory;
         self.wedges = Wedges::build(&self.factory, centre_of(size_px), metrics)?;
         Ok(())
     }
@@ -259,6 +289,178 @@ impl Renderer {
         }
 
         self.draw_hub(centre, frame);
+
+        if let Some(view) = &frame.form {
+            self.draw_form(centre, view);
+        }
+    }
+
+    /// The petal grows from its slice, so it is obvious which slot is being edited.
+    fn draw_form(&self, centre: Vector2, view: &FormView<'_>) {
+        let bounds = self.drawable_bounds();
+        let petal = Petal::new(
+            centre,
+            self.metrics.radius_px,
+            slot_bearing_rad(view.slot),
+            view.lines.len(),
+            view.progress,
+            bounds,
+        );
+
+        if let Ok(neck) = form::neck(&self.factory, centre, &petal) {
+            // SAFETY: the geometry and brush are live for the duration of the calls.
+            unsafe {
+                self.context
+                    .FillGeometry(&neck, self.brush(&self.palette.hub), None);
+                self.context.DrawGeometry(
+                    &neck,
+                    self.brush(&self.palette.accent_dim),
+                    self.metrics.divider_stroke_px,
+                    None,
+                );
+            }
+        }
+
+        let panel = form::panel(&petal);
+
+        // SAFETY: the geometry and brush are live for the duration of the calls.
+        unsafe {
+            self.context
+                .FillRoundedRectangle(&panel, self.brush(&self.palette.hub));
+            self.context.DrawRoundedRectangle(
+                &panel,
+                self.brush(&self.palette.accent),
+                self.metrics.selected_stroke_px,
+                None,
+            );
+        }
+
+        // the panel is still growing, so there is no room for text yet
+        if view.progress < FORM_TEXT_THRESHOLD {
+            return;
+        }
+
+        self.draw_text(
+            view.title,
+            petal.title_bounds(),
+            self.fonts.hub_tab(),
+            &self.palette.accent,
+        );
+        for (index, line) in view.lines.iter().enumerate() {
+            self.draw_form_line(&petal, index, line);
+        }
+    }
+
+    fn draw_form_line(&self, petal: &Petal, index: usize, line: &Line) {
+        let row = petal.row_bounds(index);
+
+        if line.focused {
+            // SAFETY: the geometry and brush are live for the duration of the call.
+            unsafe {
+                self.context
+                    .FillRectangle(&row, self.brush(&self.palette.wedge_selected))
+            };
+        }
+
+        let colour = match line.focused {
+            true => &self.palette.label_selected,
+            false => &self.palette.label,
+        };
+
+        // an action is a button, so it spans the row rather than sitting in a label column
+        if line.action {
+            self.draw_text(line.label, row, self.fonts.number(), colour);
+            return;
+        }
+
+        let (label, value) = form::split_row(row, FORM_LABEL_RATIO);
+        self.draw_text(line.label, label, self.fonts.number(), &self.palette.number);
+        self.draw_value(value, line, colour);
+    }
+
+    /// The caret is drawn by measuring the text before it, which is why the value arrives
+    /// already split in two.
+    fn draw_value(&self, bounds: D2D_RECT_F, line: &Line, colour: &D2D1_COLOR_F) {
+        let Some(value) = &line.value else {
+            return;
+        };
+
+        let text = match value {
+            RowValue::Text { before, after } => format!("{before}{after}"),
+            RowValue::Toggle(on) => match on {
+                true => "yes".to_owned(),
+                false => "no".to_owned(),
+            },
+            RowValue::Choice(chosen) => format!("< {chosen} >"),
+        };
+        self.draw_text(&text, bounds, self.fonts.number(), colour);
+
+        if !line.focused {
+            return;
+        }
+        let RowValue::Text { before, .. } = value else {
+            return;
+        };
+        self.draw_caret(bounds, before);
+    }
+
+    fn draw_caret(&self, bounds: D2D_RECT_F, before: &str) {
+        let offset = self.measure(before, self.fonts.number());
+        let x = bounds.left + offset;
+        let caret = D2D_RECT_F {
+            left: x,
+            top: bounds.top + CARET_INSET_PX,
+            right: x + CARET_WIDTH_PX,
+            bottom: bounds.bottom - CARET_INSET_PX,
+        };
+
+        // SAFETY: the geometry and brush are live for the duration of the call.
+        unsafe {
+            self.context
+                .FillRectangle(&caret, self.brush(&self.palette.accent))
+        };
+    }
+
+    /// Width of `text` in the given format, for placing the caret.
+    fn measure(
+        &self,
+        text: &str,
+        format: &windows::Win32::Graphics::DirectWrite::IDWriteTextFormat,
+    ) -> f32 {
+        if text.is_empty() {
+            return 0.0;
+        }
+        let wide: Vec<u16> = text.encode_utf16().collect();
+
+        // SAFETY: the buffer and format outlive the call; a failure just parks the caret
+        // at the start, which is visibly wrong rather than silently misplaced.
+        let layout = unsafe {
+            self.text_factory
+                .CreateTextLayout(&wide, format, f32::MAX, f32::MAX)
+        };
+        let Ok(layout) = layout else {
+            return 0.0;
+        };
+
+        let mut metrics = windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_METRICS::default();
+
+        // SAFETY: the out-pointer targets a live local.
+        if unsafe { layout.GetMetrics(&raw mut metrics) }.is_err() {
+            return 0.0;
+        }
+        metrics.widthIncludingTrailingWhitespace
+    }
+
+    /// The area a petal may use, which is the window less a hair of margin.
+    fn drawable_bounds(&self) -> D2D_RECT_F {
+        let side = self.size_px as f32;
+
+        D2D_RECT_F {
+            left: FORM_EDGE_MARGIN_PX,
+            top: FORM_EDGE_MARGIN_PX,
+            right: side - FORM_EDGE_MARGIN_PX,
+            bottom: side - FORM_EDGE_MARGIN_PX,
+        }
     }
 
     fn fill_wedges(&self, frame: &Frame<'_>) {

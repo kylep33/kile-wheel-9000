@@ -2,6 +2,7 @@
 
 pub mod activate;
 pub mod apps;
+pub mod clipboard;
 pub mod config_watch;
 pub mod hooks;
 pub mod icons;

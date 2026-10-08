@@ -62,6 +62,7 @@ pub mod keys {
     pub const A: KeyCode = KeyCode(b'A' as u16);
     pub const D: KeyCode = KeyCode(b'D' as u16);
     pub const S: KeyCode = KeyCode(b'S' as u16);
+    pub const V: KeyCode = KeyCode(b'V' as u16);
     pub const W: KeyCode = KeyCode(b'W' as u16);
     pub const DIGIT_1: KeyCode = KeyCode(b'1' as u16);
     pub const DIGIT_9: KeyCode = KeyCode(b'9' as u16);

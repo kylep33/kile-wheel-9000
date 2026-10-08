@@ -23,11 +23,13 @@ pub struct Fonts {
 }
 
 impl Fonts {
-    pub fn new(metrics: Metrics) -> Result<Self> {
+    /// Hands back the factory alongside the formats, because measuring text for the caret
+    /// needs a layout and a layout needs the factory.
+    pub fn new(metrics: Metrics) -> Result<(Self, IDWriteFactory)> {
         // SAFETY: the shared factory is reference counted by windows-rs.
         let factory: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }?;
 
-        Ok(Self {
+        let fonts = Self {
             label: centred(
                 &factory,
                 theme::LABEL_FONT,
@@ -70,7 +72,8 @@ impl Fonts {
                 DWRITE_FONT_WEIGHT_NORMAL,
                 metrics.number_size_px,
             )?,
-        })
+        };
+        Ok((fonts, factory))
     }
 
     pub fn label(&self) -> &IDWriteTextFormat {
