@@ -18,6 +18,8 @@ pub enum RowStep {
     Redraw,
     /// Move to the next line, which is what Enter does on a field.
     Advance,
+    /// Put this on the clipboard. Carries the text because only the row knows it.
+    Copy(String),
     Save,
     Delete,
     Cancel,
@@ -109,6 +111,14 @@ impl Row {
         Self::text(label, value.map(String::as_str).unwrap_or_default())
     }
 
+    /// None for anything that is not a button.
+    pub fn action(&self) -> Option<Action> {
+        match self {
+            Self::Action(action) => Some(*action),
+            _ => None,
+        }
+    }
+
     pub fn line(&self, focused: bool) -> Line {
         let (label, value, action) = match self {
             Self::Text { label, value } => {
@@ -161,7 +171,10 @@ fn press_text(
     clipboard: Option<&str>,
 ) -> RowStep {
     if modifiers.ctrl {
-        // Ctrl+V is the only combo a field takes; the rest belong to the wheel
+        // there is no selection in these fields, so Ctrl+C takes the whole value
+        if code == keys::C {
+            return RowStep::Copy(value.text());
+        }
         if code != keys::V {
             return RowStep::Ignored;
         }

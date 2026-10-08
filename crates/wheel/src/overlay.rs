@@ -13,8 +13,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{HSTRING, PCWSTR};
+use windows_numerics::Vector2;
 
-use crate::render::{Frame, Renderer};
+use crate::render::{FormView, Frame, Renderer};
 use crate::theme::{Metrics, Palette};
 
 /// Also how a second launch finds the running instance.
@@ -117,6 +118,18 @@ impl Overlay {
         self.renderer
             .draw(frame)
             .context("could not draw the wheel")
+    }
+
+    /// Which form line a screen point lands on. The point is screen-relative, so it is
+    /// turned into window coordinates here, where the window's position is known.
+    pub fn form_row_at(&self, view: &FormView<'_>, screen_x: i32, screen_y: i32) -> Option<usize> {
+        let half_px = self.renderer.metrics().window_size_px() as f32 / 2.0;
+        let point = Vector2 {
+            X: screen_x as f32 - self.centre.x as f32 + half_px,
+            Y: screen_y as f32 - self.centre.y as f32 + half_px,
+        };
+
+        self.renderer.form_row_at(view, point)
     }
 
     pub fn show(&self) {

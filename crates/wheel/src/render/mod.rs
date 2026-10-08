@@ -216,6 +216,28 @@ impl Renderer {
         self.metrics
     }
 
+    /// Which form line is under `point`, in window coordinates.
+    ///
+    /// The hit test lives here because the petal's geometry does, and a second copy in the
+    /// app would be one more thing to keep in step. The appear transform is not undone: it
+    /// has settled back to 1 by the time a click is possible.
+    pub fn form_row_at(&self, view: &FormView<'_>, point: Vector2) -> Option<usize> {
+        let petal = self.petal_for(view);
+
+        (0..view.lines.len()).find(|index| contains(&petal.row_bounds(*index), point))
+    }
+
+    fn petal_for(&self, view: &FormView<'_>) -> Petal {
+        Petal::new(
+            centre_of(self.size_px),
+            self.metrics.radius_px,
+            slot_bearing_rad(view.slot),
+            view.lines.len(),
+            view.progress,
+            self.drawable_bounds(),
+        )
+    }
+
     pub fn has_icon(&self, key: &str) -> bool {
         self.icons.contains_key(key)
     }
@@ -323,15 +345,7 @@ impl Renderer {
 
     /// The petal grows from its slice, so it is obvious which slot is being edited.
     fn draw_form(&self, centre: Vector2, view: &FormView<'_>) {
-        let bounds = self.drawable_bounds();
-        let petal = Petal::new(
-            centre,
-            self.metrics.radius_px,
-            slot_bearing_rad(view.slot),
-            view.lines.len(),
-            view.progress,
-            bounds,
-        );
+        let petal = self.petal_for(view);
 
         if let Ok(neck) = form::neck(&self.factory, centre, &petal) {
             // SAFETY: the geometry and brush are live for the duration of the calls.
@@ -893,6 +907,11 @@ impl Renderer {
 fn centre_of(size_px: u32) -> Vector2 {
     let half = size_px as f32 / 2.0;
     Vector2 { X: half, Y: half }
+}
+
+/// Right and bottom edges are exclusive, so neighbouring rows cannot both claim a click.
+fn contains(rect: &D2D_RECT_F, point: Vector2) -> bool {
+    point.X >= rect.left && point.X < rect.right && point.Y >= rect.top && point.Y < rect.bottom
 }
 
 /// Mixes two palette colours. Drawing twice with alpha would be the other way round, but

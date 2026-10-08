@@ -70,14 +70,12 @@ impl Layout {
             .collect();
 
         let overflow = memory.reconcile(&spare, &open_slots);
-        let tab_count = config.tab_count();
-        let mut tabs = vec![vec![None; Slot::COUNT]; tab_count];
+
+        // every tab is allocated, not just the ones the config mentions, so switching to an
+        // untouched tab lands on a blank wheel instead of doing nothing
+        let mut tabs = vec![vec![None; Slot::COUNT]; Tab::MAX_COUNT];
 
         for (position, item) in pinned {
-            if position.tab.index() >= tab_count {
-                continue;
-            }
-
             let entry = match item.kind.is_unpinned() {
                 true => unpinned_entry(position, memory, &groups, focused),
                 false => pinned_entry(item, &groups, focused),

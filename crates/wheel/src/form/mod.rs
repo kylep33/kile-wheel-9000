@@ -15,7 +15,7 @@ use kile_wheel_core::binding::{KeyCode, Modifiers, keys};
 use kile_wheel_core::item::{Item, ItemKind};
 use kile_wheel_core::slot::{Slot, Tab};
 
-use rows::{Row, RowStep};
+use rows::{Action, Row, RowStep};
 
 use crate::anim::Animation;
 
@@ -32,6 +32,8 @@ pub enum Outcome {
     Commit(Box<Item>),
     /// Clear the slot entirely.
     Delete,
+    /// Put this on the clipboard.
+    Copy(String),
     /// Close the form, leaving the slot as it was.
     Cancel,
 }
@@ -138,6 +140,42 @@ impl Form {
         }
     }
 
+    /// Acts on a click that landed on line `index`.
+    ///
+    /// A click is decisive rather than just a focus move: on the picker it chooses the
+    /// type, and on an action line it runs the action. Clicking a field only focuses it,
+    /// which is all a field can do without a caret position to aim at.
+    pub fn click(&mut self, index: usize) -> Outcome {
+        match &mut self.stage {
+            Stage::PickType { highlighted } => match index < ItemKind::NAMES.len() {
+                true => {
+                    *highlighted = index;
+                    self.chose_type(index)
+                }
+                false => Outcome::Ignored,
+            },
+            Stage::Fill { rows, focused, .. } => {
+                let Some(action) = rows.get(index).map(Row::action) else {
+                    return Outcome::Ignored;
+                };
+                *focused = index;
+
+                match action {
+                    Some(action) => self.run_action(action),
+                    None => Outcome::Redraw,
+                }
+            }
+        }
+    }
+
+    fn run_action(&mut self, action: Action) -> Outcome {
+        match action {
+            Action::Save => self.save(),
+            Action::Delete => Outcome::Delete,
+            Action::Cancel => Outcome::Cancel,
+        }
+    }
+
     /// Feeds a key press in. Printable characters arrive as `typed`.
     pub fn press(
         &mut self,
@@ -158,6 +196,7 @@ impl Form {
             Step::Redraw => Outcome::Redraw,
             Step::Cancel => Outcome::Cancel,
             Step::Delete => Outcome::Delete,
+            Step::Copy(text) => Outcome::Copy(text),
             Step::ChoseType(index) => self.chose_type(index),
             Step::Save => self.save(),
         }
@@ -212,6 +251,7 @@ enum Step {
     Ignored,
     Redraw,
     ChoseType(usize),
+    Copy(String),
     Save,
     Delete,
     Cancel,
@@ -276,6 +316,7 @@ fn press_fill(
             *focused = (*focused + 1).min(last);
             Step::Redraw
         }
+        RowStep::Copy(text) => Step::Copy(text),
         RowStep::Save => Step::Save,
         RowStep::Delete => Step::Delete,
         RowStep::Cancel => Step::Cancel,
@@ -516,5 +557,118 @@ mod tests {
 
         assert!(form.progress(10_000) < 0.5);
         assert!(form.animating(10_000));
+    }
+
+    /// Index of "Pinned app" in the type list, which needs filling in rather than
+    /// committing straight away.
+    const PINNED_APP: usize = 1;
+
+    /// Index of "Unpinned app slot", which commits as soon as it is picked.
+    const UNPINNED_SLOT: usize = 0;
+
+    #[test]
+    fn clicking_a_type_picks_it_rather_than_just_highlighting_it() {
+        let mut form = picker();
+
+        let outcome = form.click(PINNED_APP);
+
+        assert_eq!(outcome, Outcome::Redraw, "it should move on to the fields");
+        assert!(
+            form.lines().iter().any(|line| line.label == "Name"),
+            "the fields should be showing"
+        );
+    }
+
+    #[test]
+    fn clicking_an_unpinned_slot_commits_it_on_the_spot() {
+        let mut form = picker();
+
+        assert!(matches!(form.click(UNPINNED_SLOT), Outcome::Commit(_)));
+    }
+
+    #[test]
+    fn clicking_past_the_last_type_does_nothing() {
+        let mut form = picker();
+
+        assert_eq!(form.click(ItemKind::NAMES.len()), Outcome::Ignored);
+    }
+
+    #[test]
+    fn clicking_a_field_focuses_it() {
+        let mut form = picker();
+        form.click(PINNED_APP);
+
+        let last = form.lines().len() - 1;
+        form.click(last);
+        // Cancel is the last line, so step back to a field and check focus moved there
+        let field = 0;
+        assert_eq!(form.click(field), Outcome::Redraw);
+        assert!(
+            form.lines()[field].focused,
+            "the clicked field should be focused"
+        );
+    }
+
+    #[test]
+    fn clicking_cancel_closes_the_form() {
+        let mut form = picker();
+        form.click(PINNED_APP);
+
+        let cancel = form
+            .lines()
+            .iter()
+            .position(|line| line.label == "Cancel")
+            .expect("a filled form has a Cancel line");
+
+        assert_eq!(form.click(cancel), Outcome::Cancel);
+    }
+
+    #[test]
+    fn clicking_delete_clears_the_slot() {
+        let mut form = picker();
+        form.click(PINNED_APP);
+
+        let delete = form
+            .lines()
+            .iter()
+            .position(|line| line.label == "Delete")
+            .expect("a filled form has a Delete line");
+
+        assert_eq!(form.click(delete), Outcome::Delete);
+    }
+
+    #[test]
+    fn clicking_past_the_last_line_does_nothing() {
+        let mut form = picker();
+        form.click(PINNED_APP);
+        let past_end = form.lines().len();
+
+        assert_eq!(form.click(past_end), Outcome::Ignored);
+    }
+
+    /// The name field is seeded with the type name, so the copy is whatever the field
+    /// actually shows rather than only what was typed.
+    #[test]
+    fn ctrl_c_copies_the_whole_focused_field() {
+        let mut form = picker();
+        form.click(PINNED_APP);
+        type_text(&mut form, "notepad");
+
+        let showing = match &form.lines()[0].value {
+            Some(RowValue::Text { before, after }) => format!("{before}{after}"),
+            other => panic!("line 0 should be a text field, got {other:?}"),
+        };
+
+        let outcome = form.press(
+            keys::C,
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+            None,
+            None,
+        );
+
+        assert_eq!(outcome, Outcome::Copy(showing));
     }
 }

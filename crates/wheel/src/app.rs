@@ -382,10 +382,37 @@ impl App {
         };
 
         let outcome = form.press(code, modifiers, typed, clipboard.as_deref());
+        self.apply_form_outcome(outcome);
+    }
+
+    /// Routes a click that landed inside the form. Shared with the key path so a click and
+    /// a keypress can never drift on what Save or Delete means.
+    fn handle_form_click(&mut self, x: i32, y: i32) {
+        let lines = self.form_lines();
+        let Some(view) = self.form_view(&lines) else {
+            return;
+        };
+        let Some(index) = self.overlay.form_row_at(&view, x, y) else {
+            return;
+        };
+
+        let Some(form) = &mut self.form else {
+            return;
+        };
+        let outcome = form.click(index);
+        self.apply_form_outcome(outcome);
+    }
+
+    fn apply_form_outcome(&mut self, outcome: Outcome) {
         match outcome {
             Outcome::Ignored => {}
             Outcome::Redraw => self.redraw = true,
             Outcome::Cancel => self.close_form(),
+            Outcome::Copy(text) => {
+                // a failed copy must not close the form, so it is only reported
+                log_failure(clipboard::write_text(&text).map_err(anyhow::Error::from));
+                self.redraw = true;
+            }
             Outcome::Delete => {
                 let cleared = self.clear_slot();
                 log_failure(cleared);
@@ -505,7 +532,16 @@ impl App {
     }
 
     fn handle_left_button(&mut self, pressed: bool) {
-        if !self.state.is_open() || self.form.is_some() {
+        if !self.state.is_open() {
+            return;
+        }
+
+        // a form takes the click itself: the wheel underneath must not select or drag while
+        // the petal is covering it
+        if self.form.is_some() {
+            if let (true, Some(cursor)) = (pressed, monitor::cursor_position()) {
+                self.handle_form_click(cursor.x, cursor.y);
+            }
             return;
         }
 
@@ -665,6 +701,12 @@ impl App {
     }
 
     fn aim(&mut self, x: i32, y: i32) {
+        // the petal covers the wheel, so moving the mouse over it must not drag the
+        // highlight around underneath
+        if self.form.is_some() {
+            return;
+        }
+
         let centre = self.overlay.centre();
         let offset = Offset::new((x - centre.x) as f32, (y - centre.y) as f32);
 
@@ -696,7 +738,9 @@ impl App {
         self.overlay.place_on(monitor, &self.config)?;
 
         self.layout = Layout::build(&self.config, &self.model, &mut self.memory);
-        self.state.open(self.layout.tab_count());
+        // every tab exists whether the config mentions it or not, so an unused one is a
+        // blank wheel you can fill rather than a key that does nothing
+        self.state.open(Tab::MAX_COUNT);
         self.shared.set_wheel_open(true);
         self.load_icons();
 
@@ -1123,7 +1167,13 @@ fn overflow_note(overflow: usize) -> Option<String> {
     ))
 }
 
+/// Maps a number key to its tab. The top row reads 1 through 9 then 0, so 0 is the
+/// tenth tab rather than a zeroth one.
 fn tab_number(code: KeyCode) -> Option<usize> {
+    if code == keys::DIGIT_0 {
+        return Some(Tab::MAX_COUNT);
+    }
+
     let offset = code.0.checked_sub(keys::DIGIT_1.0)?;
     let highest = keys::DIGIT_9.0 - keys::DIGIT_1.0;
 
@@ -1177,9 +1227,23 @@ mod tests {
         assert_eq!(tab_number(keys::DIGIT_9), Some(9));
     }
 
+    /// The top row reads 1 through 9 then 0, so 0 is the tenth tab, not a zeroth one.
     #[test]
-    fn zero_and_letters_are_not_tab_keys() {
-        assert_eq!(tab_number(KeyCode(b'0' as u16)), None);
+    fn zero_maps_to_the_last_tab() {
+        assert_eq!(tab_number(keys::DIGIT_0), Some(Tab::MAX_COUNT));
+        assert_eq!(Tab::MAX_COUNT, 10);
+    }
+
+    #[test]
+    fn every_number_key_reaches_a_real_tab() {
+        for code in [keys::DIGIT_0, keys::DIGIT_1, keys::DIGIT_9] {
+            let number = tab_number(code).expect("a number key maps to a tab");
+            assert!(Tab::from_number(number).is_some(), "tab {number}");
+        }
+    }
+
+    #[test]
+    fn letters_and_enter_are_not_tab_keys() {
         assert_eq!(tab_number(keys::W), None);
         assert_eq!(tab_number(keys::ENTER), None);
     }

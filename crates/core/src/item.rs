@@ -240,7 +240,8 @@ mod tests {
         let item = Item {
             name: "nope".to_owned(),
             icon: None,
-            tab: 10,
+            // one past the last tab, written from the constant so it cannot go stale
+            tab: Tab::MAX_COUNT + 1,
             slot: 0,
             kind: ItemKind::Folder {
                 path: "C:\\".to_owned(),

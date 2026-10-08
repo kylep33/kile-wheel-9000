@@ -17,7 +17,8 @@ use thiserror::Error;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU,
+    VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT,
@@ -308,9 +309,14 @@ unsafe fn keyboard_swallows(code: i32, wparam: WPARAM, lparam: LPARAM) -> bool {
 
     let key = KeyCode(info.vkCode as u16);
     let trigger = Trigger::Key(key);
+    let pressed = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
+
+    // tracked before the modifiers are read, so a modifier press is already counted by the
+    // time the key it modifies arrives
+    note_modifier(key, pressed);
     let modifiers = current_modifiers();
 
-    if !matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN) {
+    if !pressed {
         return on_release(
             shared,
             trigger,
@@ -471,12 +477,78 @@ fn hook_state(code: i32) -> Option<&'static SharedInput> {
 }
 
 fn current_modifiers() -> Modifiers {
+    let tracked = TRACKED_MODIFIERS.with(|held| held.get());
+
+    // the two sources are OR'ed because neither is complete on its own: a key this hook
+    // swallowed never reaches the async state table, and a key already down before the
+    // hook was installed was never seen here
     Modifiers {
-        ctrl: is_down(VK_CONTROL),
-        shift: is_down(VK_SHIFT),
-        alt: is_down(VK_MENU),
-        win: is_down(VK_LWIN) || is_down(VK_RWIN),
+        ctrl: tracked.ctrl || is_down(VK_CONTROL),
+        shift: tracked.shift || is_down(VK_SHIFT),
+        alt: tracked.alt || is_down(VK_MENU),
+        win: tracked.win || is_down(VK_LWIN) || is_down(VK_RWIN),
     }
+}
+
+std::thread_local! {
+    /// Modifiers this hook has seen pressed and not yet released.
+    ///
+    /// Needed because swallowing a key stops Windows from recording it: while the wheel is
+    /// open it eats everything, so `GetAsyncKeyState` would report Shift and Ctrl as up and
+    /// the form would type "v" instead of pasting. Thread-local because only the hook
+    /// thread touches it.
+    static TRACKED_MODIFIERS: std::cell::Cell<Modifiers> = const {
+        std::cell::Cell::new(Modifiers {
+            ctrl: false,
+            alt: false,
+            shift: false,
+            win: false,
+        })
+    };
+}
+
+/// Records a modifier going down or coming up. Other keys are ignored.
+fn note_modifier(key: KeyCode, pressed: bool) {
+    let Some(which) = modifier_of(key) else {
+        return;
+    };
+
+    TRACKED_MODIFIERS.with(|held| {
+        let mut modifiers = held.get();
+        *which.field(&mut modifiers) = pressed;
+        held.set(modifiers);
+    });
+}
+
+/// Which modifier a key is, counting the left and right variants as the same one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Modifier {
+    Ctrl,
+    Shift,
+    Alt,
+    Win,
+}
+
+impl Modifier {
+    fn field(self, modifiers: &mut Modifiers) -> &mut bool {
+        match self {
+            Self::Ctrl => &mut modifiers.ctrl,
+            Self::Shift => &mut modifiers.shift,
+            Self::Alt => &mut modifiers.alt,
+            Self::Win => &mut modifiers.win,
+        }
+    }
+}
+
+fn modifier_of(key: KeyCode) -> Option<Modifier> {
+    let found = match VIRTUAL_KEY(key.0) {
+        VK_CONTROL | VK_LCONTROL | VK_RCONTROL => Modifier::Ctrl,
+        VK_SHIFT | VK_LSHIFT | VK_RSHIFT => Modifier::Shift,
+        VK_MENU | VK_LMENU | VK_RMENU => Modifier::Alt,
+        VK_LWIN | VK_RWIN => Modifier::Win,
+        _ => return None,
+    };
+    Some(found)
 }
 
 fn is_down(key: VIRTUAL_KEY) -> bool {
@@ -509,4 +581,77 @@ fn forget(trigger: Trigger) -> bool {
         held.swap_remove(at);
         true
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs on a fresh thread each time, because the tracker is thread-local and these
+    /// cases must not see each other's state.
+    fn on_hook_thread(body: impl FnOnce() + Send + 'static) {
+        std::thread::spawn(body).join().expect("the case panicked");
+    }
+
+    #[test]
+    fn the_left_and_right_variants_are_the_same_modifier() {
+        assert_eq!(modifier_of(KeyCode(VK_LSHIFT.0)), Some(Modifier::Shift));
+        assert_eq!(modifier_of(KeyCode(VK_RSHIFT.0)), Some(Modifier::Shift));
+        assert_eq!(modifier_of(KeyCode(VK_SHIFT.0)), Some(Modifier::Shift));
+    }
+
+    #[test]
+    fn every_modifier_key_is_recognised() {
+        for key in [VK_LCONTROL, VK_RCONTROL, VK_CONTROL] {
+            assert_eq!(modifier_of(KeyCode(key.0)), Some(Modifier::Ctrl));
+        }
+        for key in [VK_LMENU, VK_RMENU, VK_MENU] {
+            assert_eq!(modifier_of(KeyCode(key.0)), Some(Modifier::Alt));
+        }
+        for key in [VK_LWIN, VK_RWIN] {
+            assert_eq!(modifier_of(KeyCode(key.0)), Some(Modifier::Win));
+        }
+    }
+
+    #[test]
+    fn an_ordinary_key_is_not_a_modifier() {
+        assert_eq!(modifier_of(KeyCode(u16::from(b'W'))), None);
+    }
+
+    /// The reason this tracker exists: a swallowed Shift never reaches the async key state
+    /// table, so the form would see no Shift and type a lower-case letter.
+    #[test]
+    fn a_tracked_shift_is_reported_even_though_windows_never_saw_it() {
+        on_hook_thread(|| {
+            assert!(!current_modifiers().shift, "no shift should be down yet");
+
+            note_modifier(KeyCode(VK_LSHIFT.0), true);
+            assert!(current_modifiers().shift, "the press should be tracked");
+
+            note_modifier(KeyCode(VK_LSHIFT.0), false);
+            assert!(!current_modifiers().shift, "the release should clear it");
+        });
+    }
+
+    #[test]
+    fn a_tracked_ctrl_is_what_lets_the_form_tell_paste_from_a_typed_v() {
+        on_hook_thread(|| {
+            note_modifier(KeyCode(VK_RCONTROL.0), true);
+            assert!(current_modifiers().ctrl);
+
+            note_modifier(KeyCode(VK_RCONTROL.0), false);
+            assert!(!current_modifiers().ctrl);
+        });
+    }
+
+    #[test]
+    fn an_ordinary_key_leaves_the_tracked_modifiers_alone() {
+        on_hook_thread(|| {
+            note_modifier(KeyCode(VK_LSHIFT.0), true);
+            note_modifier(KeyCode(u16::from(b'W')), true);
+            note_modifier(KeyCode(u16::from(b'W')), false);
+
+            assert!(current_modifiers().shift, "W must not clear shift");
+        });
+    }
 }

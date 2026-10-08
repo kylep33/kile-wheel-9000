@@ -33,8 +33,8 @@ impl Slot {
 pub struct Tab(u8);
 
 impl Tab {
-    /// One per number key, which is what caps it at nine.
-    pub const MAX_COUNT: usize = 9;
+    /// One per number key along the top row, 1 through 9 then 0 for the tenth.
+    pub const MAX_COUNT: usize = 10;
     pub const FIRST: Self = Self(0);
 
     pub fn from_number(number: usize) -> Option<Self> {
