@@ -107,6 +107,8 @@ pub struct HubView<'a> {
     pub tab_line: &'a str,
     pub clock: Option<&'a str>,
     pub date: Option<&'a str>,
+    /// Said out loud under the ring when apps outnumber the unpinned slots.
+    pub overflow_note: Option<&'a str>,
 }
 
 /// Everything one frame needs.
@@ -745,12 +747,13 @@ impl Renderer {
             &self.palette.accent_dim,
         );
 
-        self.draw_overflow(centre, frame.overflow);
+        self.draw_overflow(centre, frame);
     }
 
-    /// Only drawn when apps outnumber the unpinned slots, so its presence is the message.
-    fn draw_overflow(&self, centre: Vector2, overflow: usize) {
-        if overflow == 0 {
+    /// The glyph sits by the cog, and the note goes outside the ring, where there is room
+    /// for a sentence without crowding the clock.
+    fn draw_overflow(&self, centre: Vector2, frame: &Frame<'_>) {
+        if frame.overflow == 0 {
             return;
         }
 
@@ -764,6 +767,24 @@ impl Renderer {
             box_around(at, box_px, box_px),
             self.fonts.cog(),
             &self.palette.accent,
+        );
+
+        let Some(note) = frame.hub.overflow_note else {
+            return;
+        };
+        let note_at = Vector2 {
+            X: centre.X,
+            Y: centre.Y + self.metrics.radius_px + self.metrics.overflow_note_gap_px(),
+        };
+        self.draw_text(
+            note,
+            box_around(
+                note_at,
+                self.size_px as f32,
+                self.metrics.overflow_note_height_px(),
+            ),
+            self.fonts.hub_date(),
+            &self.palette.accent_dim,
         );
     }
 

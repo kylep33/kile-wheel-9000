@@ -40,6 +40,10 @@ const DATE_Y_RATIO: f32 = 0.30;
 const COG_Y_RATIO: f32 = 0.66;
 const COG_HIT_RATIO: f32 = 1.35;
 
+/// The overflow note sits outside the ring, in multiples of its own font size.
+const OVERFLOW_NOTE_GAP_RATIO: f32 = 1.4;
+const NOTE_LINE_RATIO: f32 = 2.0;
+
 const FULL_CHANNEL: f32 = 255.0;
 
 pub const LABEL_FONT: &str = "Segoe UI";
@@ -153,6 +157,17 @@ impl Metrics {
 
     pub fn hub_date_offset_px(self) -> f32 {
         self.hub_radius_px * DATE_Y_RATIO
+    }
+
+    /// How far outside the ring the overflow note sits. Clear of the ring stroke, inside
+    /// the margin the window already carries for petals.
+    pub fn overflow_note_gap_px(self) -> f32 {
+        self.hub_date_size_px * OVERFLOW_NOTE_GAP_RATIO
+    }
+
+    /// Tall enough for one line of the note's font.
+    pub fn overflow_note_height_px(self) -> f32 {
+        self.hub_date_size_px * NOTE_LINE_RATIO
     }
 }
 

@@ -838,6 +838,7 @@ impl App {
         let clock = now.format(CLOCK_FORMAT).to_string();
         let date = now.format(DATE_FORMAT).to_string();
         let show_clock = self.config.general.show_clock;
+        let overflow_note = overflow_note(self.layout.overflow());
 
         self.overlay.draw(&Frame {
             slots,
@@ -848,6 +849,7 @@ impl App {
                 tab_line: &self.tab_line(tab),
                 clock: show_clock.then_some(clock.as_str()),
                 date: show_clock.then_some(date.as_str()),
+                overflow_note: overflow_note.as_deref(),
             },
             edit_mode: self.state.edit_mode(),
             dragging: self.state.dragging(),
@@ -893,6 +895,7 @@ impl App {
                 tab_line: "WINDOWS",
                 clock: None,
                 date: None,
+                overflow_note: None,
             },
             edit_mode: false,
             dragging: None,
@@ -1080,6 +1083,22 @@ fn quip(quips: &[String], tab: Tab, slot: Slot) -> &str {
     quips[spread % quips.len()].as_str()
 }
 
+/// Says what the overflow glyph means, since a glyph on its own does not explain itself.
+/// `None` when nothing overflowed, which is also when the glyph is not drawn.
+fn overflow_note(overflow: usize) -> Option<String> {
+    if overflow == 0 {
+        return None;
+    }
+
+    let plural = match overflow {
+        1 => "app has",
+        _ => "apps have",
+    };
+    Some(format!(
+        "{overflow} {plural} nowhere to land. Add unpinned app slots, or close a few."
+    ))
+}
+
 fn tab_number(code: KeyCode) -> Option<usize> {
     let offset = code.0.checked_sub(keys::DIGIT_1.0)?;
     let highest = keys::DIGIT_9.0 - keys::DIGIT_1.0;
@@ -1164,5 +1183,28 @@ mod tests {
     #[test]
     fn an_empty_quip_list_draws_nothing_rather_than_panicking() {
         assert_eq!(quip(&[], Tab::FIRST, Slot::new(0).expect("slot 0")), "");
+    }
+
+    #[test]
+    fn nothing_overflowing_says_nothing() {
+        assert_eq!(overflow_note(0), None);
+    }
+
+    #[test]
+    fn one_overflowing_app_reads_as_singular() {
+        let note = overflow_note(1).expect("one app overflowed");
+        assert!(note.starts_with("1 app has"), "{note}");
+    }
+
+    #[test]
+    fn several_overflowing_apps_read_as_plural() {
+        let note = overflow_note(3).expect("three apps overflowed");
+        assert!(note.starts_with("3 apps have"), "{note}");
+    }
+
+    #[test]
+    fn the_overflow_note_says_what_to_do_about_it() {
+        let note = overflow_note(2).expect("two apps overflowed");
+        assert!(note.contains("unpinned app slots"), "{note}");
     }
 }
