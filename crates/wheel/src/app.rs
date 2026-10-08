@@ -418,17 +418,21 @@ impl App {
 
     fn close_form(&mut self) {
         self.form = None;
-        self.overlay.stop_frame_timer();
         self.redraw = true;
+        // the wheel's own transitions may still be running, so the timer is re-evaluated
+        // rather than simply stopped
+        self.drive_animation();
     }
 
-    /// Keeps frames coming while the petal is still growing, then stops.
+    /// Keeps frames coming while anything is still moving, then stops. Without this the
+    /// transitions would only advance when some other input happened to force a redraw.
     fn drive_animation(&mut self) {
-        let duration_ms = self.config.wheel.animation.duration_ms();
-        let animating = self
+        let duration_ms = self.animation_ms();
+        let form_running = self
             .form
             .as_ref()
             .is_some_and(|form| form.animating(duration_ms));
+        let animating = form_running || (self.state.is_open() && self.state.animating(duration_ms));
 
         match animating {
             true => self.overlay.start_frame_timer(FRAME_MS),
@@ -705,6 +709,10 @@ impl App {
         if let Some(seen_at) = hotkey_seen_at {
             report_open_latency(seen_at.elapsed());
         }
+
+        // measured after the latency report, so the timer setup is never counted against
+        // the open budget
+        self.drive_animation();
         Ok(())
     }
 
@@ -834,6 +842,8 @@ impl App {
         self.overlay.draw(&Frame {
             slots,
             selected: self.state.selected(),
+            highlights: self.highlights(),
+            appear: self.state.appear_progress(self.animation_ms()),
             hub: HubView {
                 tab_line: &self.tab_line(tab),
                 clock: show_clock.then_some(clock.as_str()),
@@ -843,6 +853,22 @@ impl App {
             dragging: self.state.dragging(),
             overflow: self.layout.overflow(),
             form: self.form_view(&lines),
+        })
+    }
+
+    fn animation_ms(&self) -> u64 {
+        self.config.wheel.animation.duration_ms()
+    }
+
+    /// How lit each wedge is this frame, which is what makes the selection slide rather
+    /// than jump between wedges.
+    fn highlights(&self) -> [f32; Slot::COUNT] {
+        let hover = self.state.hover();
+        let duration_ms = self.animation_ms();
+
+        std::array::from_fn(|index| {
+            let slot = Slot::new(index).expect("index comes from the array length");
+            hover.highlight(slot, duration_ms)
         })
     }
 
@@ -861,6 +887,8 @@ impl App {
         self.overlay.draw(&Frame {
             slots,
             selected: self.state.selected(),
+            highlights: self.highlights(),
+            appear: self.state.appear_progress(self.animation_ms()),
             hub: HubView {
                 tab_line: "WINDOWS",
                 clock: None,

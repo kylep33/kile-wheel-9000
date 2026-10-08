@@ -4,6 +4,8 @@ use kile_wheel_core::select::Held;
 use kile_wheel_core::slot::{Cardinal, Slot, Tab};
 use windows::Win32::Foundation::HWND;
 
+use crate::anim::Animation;
+
 /// One window of an app that has more than one open.
 #[derive(Debug, Clone)]
 pub struct WindowChoice {
@@ -44,6 +46,33 @@ pub enum Back {
     Closed,
 }
 
+/// What the selection is moving from and to, so the renderer can light one wedge while the
+/// other goes out instead of snapping between them.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Hover {
+    pub from: Option<Slot>,
+    pub to: Option<Slot>,
+    pub moved: Animation,
+}
+
+impl Hover {
+    /// How lit `slot` should be, from 0 to 1. Anything that is neither end of the move is
+    /// unlit, and a slot that is both ends stays lit.
+    pub fn highlight(&self, slot: Slot, duration_ms: u64) -> f32 {
+        let progress = self.moved.progress(duration_ms);
+
+        match (self.to == Some(slot), self.from == Some(slot)) {
+            (true, _) => progress,
+            (false, true) => 1.0 - progress,
+            (false, false) => 0.0,
+        }
+    }
+
+    fn running(&self, duration_ms: u64) -> bool {
+        self.from != self.to && self.moved.running(duration_ms)
+    }
+}
+
 /// Selection and mode.
 #[derive(Debug, Default)]
 pub struct WheelState {
@@ -56,6 +85,10 @@ pub struct WheelState {
     mode: Mode,
     edit: bool,
     dragging: Option<Slot>,
+    hover: Hover,
+    /// Restarted whenever a whole new wheel appears, which is an open, a tab change or a
+    /// step into or out of a sub-wheel.
+    appeared: Animation,
 }
 
 impl WheelState {
@@ -65,6 +98,20 @@ impl WheelState {
 
     pub fn selected(&self) -> Option<Slot> {
         self.selected
+    }
+
+    pub fn hover(&self) -> Hover {
+        self.hover
+    }
+
+    /// How far the wheel has grown in, from 0 to 1.
+    pub fn appear_progress(&self, duration_ms: u64) -> f32 {
+        self.appeared.progress(duration_ms)
+    }
+
+    /// Whether any transition still needs frames drawn for it.
+    pub fn animating(&self, duration_ms: u64) -> bool {
+        self.appeared.running(duration_ms) || self.hover.running(duration_ms)
     }
 
     pub fn tab(&self) -> Tab {
@@ -93,6 +140,7 @@ impl WheelState {
         self.open = true;
         self.tab_count = tab_count.max(1);
         self.tab = Tab::FIRST;
+        self.appeared.restart();
         self.reset_selection();
         self.mode = Mode::Wheel;
         self.edit = false;
@@ -133,7 +181,8 @@ impl WheelState {
     pub fn press_direction(&mut self, key: Cardinal) {
         self.held.press(key);
         self.pointer = Pointer::Keys;
-        self.selected = self.held.slot();
+        let held = self.held.slot();
+        self.set_selection(held);
     }
 
     /// Letting go falls back to whatever is still held, and letting go of everything
@@ -146,7 +195,8 @@ impl WheelState {
         if self.pointer != Pointer::Keys {
             return;
         }
-        self.selected = self.held.slot();
+        let held = self.held.slot();
+        self.set_selection(held);
     }
 
     /// Mouse takes the selection over. Inside the hub there is no angle to read, so the
@@ -157,12 +207,13 @@ impl WheelState {
         };
 
         self.pointer = Pointer::Mouse;
-        self.selected = Some(slot);
+        self.set_selection(Some(slot));
     }
 
     /// Edit mode belongs to the wheel, so a sub-wheel leaves it behind.
     pub fn enter_sub_wheel(&mut self, windows: Vec<WindowChoice>) {
         self.mode = Mode::SubWheel { windows };
+        self.appeared.restart();
         self.edit = false;
         self.dragging = None;
         self.reset_selection();
@@ -176,6 +227,7 @@ impl WheelState {
     pub fn back(&mut self) -> Back {
         if self.in_sub_wheel() {
             self.mode = Mode::Wheel;
+            self.appeared.restart();
             self.reset_selection();
             return Back::WentUp;
         }
@@ -212,9 +264,23 @@ impl WheelState {
     }
 
     fn reset_selection(&mut self) {
-        self.selected = None;
+        self.set_selection(None);
         self.held.clear();
         self.pointer = Pointer::Keys;
+    }
+
+    /// The one place the selection changes, so the hover transition can never be missed.
+    fn set_selection(&mut self, next: Option<Slot>) {
+        if self.selected == next {
+            return;
+        }
+
+        self.hover = Hover {
+            from: self.selected,
+            to: next,
+            moved: Animation::started(),
+        };
+        self.selected = next;
     }
 }
 
@@ -439,5 +505,86 @@ mod tests {
 
         assert_eq!(state.end_drag(), Some(Direction::East.slot()));
         assert_eq!(state.end_drag(), None);
+    }
+
+    /// Animations off, so the transition is always finished and the lit wedge is the new one.
+    const INSTANT_MS: u64 = 0;
+
+    /// Long enough that the transition is still near its start.
+    const SLOW_MS: u64 = 10_000;
+
+    #[test]
+    fn the_wedge_being_moved_to_is_lit_once_the_move_finishes() {
+        let mut state = opened();
+        state.press_direction(Cardinal::East);
+
+        let hover = state.hover();
+        assert_eq!(hover.highlight(Direction::East.slot(), INSTANT_MS), 1.0);
+    }
+
+    #[test]
+    fn the_wedge_being_moved_off_gives_up_its_light() {
+        let mut state = opened();
+        state.press_direction(Cardinal::East);
+        state.press_direction(Cardinal::North);
+
+        let hover = state.hover();
+        assert_eq!(hover.highlight(Direction::East.slot(), INSTANT_MS), 0.0);
+    }
+
+    #[test]
+    fn a_wedge_the_move_does_not_touch_stays_dark() {
+        let mut state = opened();
+        state.press_direction(Cardinal::East);
+
+        let hover = state.hover();
+        assert_eq!(hover.highlight(Direction::South.slot(), INSTANT_MS), 0.0);
+    }
+
+    #[test]
+    fn the_light_crosses_over_partway_through_the_move() {
+        let mut state = opened();
+        state.press_direction(Cardinal::East);
+        state.press_direction(Cardinal::North);
+
+        let hover = state.hover();
+        let leaving = hover.highlight(Direction::East.slot(), SLOW_MS);
+        let arriving = hover.highlight(Direction::North.slot(), SLOW_MS);
+
+        assert!(
+            leaving > arriving,
+            "the old wedge should still be the brighter one"
+        );
+        assert!(
+            (leaving + arriving - 1.0).abs() < f32::EPSILON,
+            "the pair should sum to one"
+        );
+    }
+
+    #[test]
+    fn re_aiming_at_the_same_slot_does_not_restart_the_move() {
+        let mut state = opened();
+        state.aim_at(Some(Direction::East.slot()));
+        let first = state.hover();
+
+        state.aim_at(Some(Direction::East.slot()));
+
+        assert_eq!(state.hover().from, first.from);
+    }
+
+    #[test]
+    fn a_wheel_that_just_opened_is_still_growing_in() {
+        let state = opened();
+
+        assert!(state.appear_progress(SLOW_MS) < 1.0);
+        assert!(state.animating(SLOW_MS));
+    }
+
+    #[test]
+    fn nothing_is_animating_once_animations_are_switched_off() {
+        let state = opened();
+
+        assert_eq!(state.appear_progress(INSTANT_MS), 1.0);
+        assert!(!state.animating(INSTANT_MS));
     }
 }

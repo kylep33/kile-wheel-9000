@@ -11,13 +11,13 @@ mod text;
 pub use petal::{PETAL_MAX_REACH_RATIO, Petal};
 pub use rows::{Line, RowValue};
 
-use std::time::Instant;
-
 use kile_wheel_core::binding::{KeyCode, Modifiers, keys};
 use kile_wheel_core::item::{Item, ItemKind};
 use kile_wheel_core::slot::{Slot, Tab};
 
 use rows::{Row, RowStep};
+
+use crate::anim::Animation;
 
 /// Name an unpinned app slot is given, since the running app supplies the label anyway.
 const UNPINNED_NAME: &str = "Open";
@@ -58,7 +58,7 @@ pub struct Form {
     stage: Stage,
     /// Whether the slot already held something, which decides if Delete does anything.
     occupied: bool,
-    opened_at: Instant,
+    opened: Animation,
 }
 
 impl Form {
@@ -69,7 +69,7 @@ impl Form {
             slot,
             stage: Stage::PickType { highlighted: 0 },
             occupied: false,
-            opened_at: Instant::now(),
+            opened: Animation::started(),
         }
     }
 
@@ -84,7 +84,7 @@ impl Form {
                 focused: 0,
             },
             occupied: true,
-            opened_at: Instant::now(),
+            opened: Animation::started(),
         }
     }
 
@@ -102,17 +102,12 @@ impl Form {
 
     /// How far the open animation has run, from 0 to 1.
     pub fn progress(&self, duration_ms: u64) -> f32 {
-        if duration_ms == 0 {
-            return 1.0;
-        }
-
-        let elapsed = self.opened_at.elapsed().as_millis() as f32;
-        ease_out((elapsed / duration_ms as f32).clamp(0.0, 1.0))
+        self.opened.progress(duration_ms)
     }
 
     /// Whether the animation is still running, so the caller knows to keep drawing.
     pub fn animating(&self, duration_ms: u64) -> bool {
-        self.progress(duration_ms) < 1.0
+        self.opened.running(duration_ms)
     }
 
     pub fn title(&self) -> &'static str {
@@ -184,7 +179,7 @@ impl Form {
             rows: rows::build(&seed),
             focused: 0,
         };
-        self.opened_at = Instant::now();
+        self.opened.restart();
         Outcome::Redraw
     }
 
@@ -285,11 +280,6 @@ fn press_fill(
         RowStep::Delete => Step::Delete,
         RowStep::Cancel => Step::Cancel,
     }
-}
-
-/// Fast out of the gate and settling at the end, which reads as the panel springing open.
-fn ease_out(progress: f32) -> f32 {
-    1.0 - (1.0 - progress).powi(3)
 }
 
 #[cfg(test)]
@@ -526,12 +516,5 @@ mod tests {
 
         assert!(form.progress(10_000) < 0.5);
         assert!(form.animating(10_000));
-    }
-
-    #[test]
-    fn easing_runs_from_zero_to_one() {
-        assert_eq!(ease_out(0.0), 0.0);
-        assert_eq!(ease_out(1.0), 1.0);
-        assert!(ease_out(0.5) > 0.5, "the ease should lead, not lag");
     }
 }

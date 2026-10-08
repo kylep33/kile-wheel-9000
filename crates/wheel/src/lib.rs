@@ -3,6 +3,7 @@
 //! The binary beside this library is a thin entry point. Everything else lives here so it
 //! can be unit tested without the elevation the binary's manifest asks for.
 
+pub mod anim;
 pub mod app;
 pub mod form;
 pub mod keyboard;

@@ -21,7 +21,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
     D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
     D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, D2D1CreateFactory, ID2D1Bitmap1,
-    ID2D1DeviceContext, ID2D1Factory1, ID2D1Image, ID2D1SolidColorBrush,
+    ID2D1DeviceContext, ID2D1Factory1, ID2D1Image, ID2D1PathGeometry1, ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
@@ -40,8 +40,9 @@ use windows::Win32::Graphics::Dxgi::{
     IDXGISurface, IDXGISwapChain1,
 };
 use windows::core::{Interface, Result};
-use windows_numerics::Vector2;
+use windows_numerics::{Matrix3x2, Vector2};
 
+use crate::anim;
 use crate::form::{Line, Petal, RowValue};
 use crate::theme::{self, Metrics, Palette};
 use geometry::{Wedges, on_circle, slot_bearing_rad, slot_edge_rad};
@@ -77,6 +78,10 @@ const FORM_EDGE_MARGIN_PX: f32 = 6.0;
 const CARET_WIDTH_PX: f32 = 1.6;
 const CARET_INSET_PX: f32 = 3.0;
 
+/// Where the open animation starts the wheel. Close enough to full size that the wheel is
+/// readable on the first frame, far enough to read as arriving.
+const APPEAR_FROM_SCALE: f32 = 0.88;
+
 const NO_MULTISAMPLING: DXGI_SAMPLE_DESC = DXGI_SAMPLE_DESC {
     Count: 1,
     Quality: 0,
@@ -109,6 +114,10 @@ pub struct HubView<'a> {
 pub struct Frame<'a> {
     pub slots: [SlotView<'a>; Slot::COUNT],
     pub selected: Option<Slot>,
+    /// How lit each wedge is, from 0 to 1, so the selection can move rather than jump.
+    pub highlights: [f32; Slot::COUNT],
+    /// How far the wheel has grown in, from 0 to 1.
+    pub appear: f32,
     pub hub: HubView<'a>,
     pub edit_mode: bool,
     pub dragging: Option<Slot>,
@@ -274,6 +283,8 @@ impl Renderer {
     fn draw_wheel(&self, frame: &Frame<'_>) {
         let centre = centre_of(self.size_px);
 
+        self.apply_appear(centre, frame.appear);
+
         self.fill_circle(centre, self.metrics.radius_px, &self.palette.backdrop);
         self.fill_wedges(frame);
         self.draw_dividers(centre);
@@ -293,6 +304,19 @@ impl Renderer {
         if let Some(view) = &frame.form {
             self.draw_form(centre, view);
         }
+
+        // SAFETY: leaves the context as it was found, so the next frame starts clean.
+        unsafe { self.context.SetTransform(&Matrix3x2::identity()) };
+    }
+
+    /// The wheel grows into place from slightly small, which points the eye at the centre
+    /// without delaying anything: input is live from the first frame.
+    fn apply_appear(&self, centre: Vector2, progress: f32) {
+        let scale = anim::lerp(APPEAR_FROM_SCALE, 1.0, progress);
+        let transform = Matrix3x2::scale_around(scale, scale, centre);
+
+        // SAFETY: the matrix is copied into the context by the call.
+        unsafe { self.context.SetTransform(&transform) };
     }
 
     /// The petal grows from its slice, so it is obvious which slot is being edited.
@@ -468,35 +492,46 @@ impl Renderer {
             let Some(wedge) = self.wedges.get(slot) else {
                 continue;
             };
-            let selected = frame.selected == Some(slot);
-            let fill = match selected {
-                true => &self.palette.wedge_selected,
-                false => &self.palette.wedge,
-            };
+            let highlight = frame.highlights[slot.index()];
+            let fill = blend(&self.palette.wedge, &self.palette.wedge_selected, highlight);
 
             // SAFETY: the geometry and brush are live for the duration of the call.
-            unsafe { self.context.FillGeometry(wedge, self.brush(fill), None) };
+            unsafe { self.context.FillGeometry(wedge, self.brush(&fill), None) };
 
-            if !selected && !frame.edit_mode {
+            // a wedge still fading out keeps its outline until it is dark again
+            if highlight <= 0.0 && !frame.edit_mode {
                 continue;
             }
 
-            let outline = match (selected, frame.dragging == Some(slot)) {
-                (_, true) => &self.palette.running,
-                (true, false) => &self.palette.accent,
-                (false, false) => &self.palette.accent_dim,
-            };
-            let stroke = match selected {
-                true => self.metrics.selected_stroke_px,
-                false => self.metrics.edit_stroke_px,
-            };
-
-            // SAFETY: as above.
-            unsafe {
-                self.context
-                    .DrawGeometry(wedge, self.brush(outline), stroke, None)
-            };
+            self.outline_wedge(wedge, slot, frame, highlight);
         }
+    }
+
+    /// The outline tracks the fill, so a wedge brightening does not get a hard edge before
+    /// it has finished lighting up.
+    fn outline_wedge(
+        &self,
+        wedge: &ID2D1PathGeometry1,
+        slot: Slot,
+        frame: &Frame<'_>,
+        highlight: f32,
+    ) {
+        let dragged = frame.dragging == Some(slot);
+        let outline = match dragged {
+            true => self.palette.running,
+            false => blend(&self.palette.accent_dim, &self.palette.accent, highlight),
+        };
+        let stroke = anim::lerp(
+            self.metrics.edit_stroke_px,
+            self.metrics.selected_stroke_px,
+            highlight,
+        );
+
+        // SAFETY: the geometry and brush are live for the duration of the call.
+        unsafe {
+            self.context
+                .DrawGeometry(wedge, self.brush(&outline), stroke, None)
+        };
     }
 
     fn draw_dividers(&self, centre: Vector2) {
@@ -837,6 +872,17 @@ impl Renderer {
 fn centre_of(size_px: u32) -> Vector2 {
     let half = size_px as f32 / 2.0;
     Vector2 { X: half, Y: half }
+}
+
+/// Mixes two palette colours. Drawing twice with alpha would be the other way round, but
+/// the renderer shares one brush, so a mixed colour is the honest option.
+fn blend(from: &D2D1_COLOR_F, to: &D2D1_COLOR_F, factor: f32) -> D2D1_COLOR_F {
+    D2D1_COLOR_F {
+        r: anim::lerp(from.r, to.r, factor),
+        g: anim::lerp(from.g, to.g, factor),
+        b: anim::lerp(from.b, to.b, factor),
+        a: anim::lerp(from.a, to.a, factor),
+    }
 }
 
 fn circle(centre: Vector2, radius_px: f32) -> D2D1_ELLIPSE {
