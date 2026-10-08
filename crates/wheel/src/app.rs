@@ -252,15 +252,17 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode) {
-        if !self.state.is_open() {
-            return;
-        }
-
-        // esc always closes everything, wherever it is pressed
+        // Esc is handled before the open check on purpose: it is the way out if the state
+        // and the hook ever disagree about whether the wheel is up, and the hook is what
+        // decides whether your keys reach anything.
         if code == keys::ESC {
             self.close();
             return;
         }
+        if !self.state.is_open() {
+            return;
+        }
+
         if code == keys::BACKSPACE {
             self.go_back();
             return;
@@ -517,11 +519,9 @@ impl App {
         Ok(())
     }
 
+    /// Unconditional on purpose. A guard here once let a state desync leave the hook
+    /// believing the wheel was open, which swallowed every key until the next open.
     fn close(&mut self) {
-        if !self.state.is_open() {
-            return;
-        }
-
         self.overlay.stop_hold_timer();
         self.press = None;
         self.shared.set_wheel_open(false);

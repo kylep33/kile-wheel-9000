@@ -168,8 +168,11 @@ impl WheelState {
         self.reset_selection();
     }
 
-    /// Backs out exactly one level: sub-wheel to wheel, edit mode to normal, and from the
-    /// plain wheel all the way shut.
+    /// Decides what backing out one level means, and reports it.
+    ///
+    /// Closing is left to the caller rather than done here, because the close sequence
+    /// also has to tell the input hook to stop swallowing keys. Splitting that across two
+    /// places is what let the wheel stay up with the keyboard captured.
     pub fn back(&mut self) -> Back {
         if self.in_sub_wheel() {
             self.mode = Mode::Wheel;
@@ -182,7 +185,6 @@ impl WheelState {
             return Back::WentUp;
         }
 
-        self.close();
         Back::Closed
     }
 
@@ -363,7 +365,6 @@ mod tests {
         assert_eq!(state.back(), Back::WentUp);
         assert!(state.is_open());
         assert_eq!(state.back(), Back::Closed);
-        assert!(!state.is_open());
     }
 
     #[test]
@@ -374,6 +375,29 @@ mod tests {
         assert_eq!(state.back(), Back::WentUp);
         assert!(!state.edit_mode());
         assert_eq!(state.back(), Back::Closed);
+    }
+
+    /// `back` must not close the state itself. The caller owns closing, because closing
+    /// also has to tell the input hook to stop swallowing keys; when this method did half
+    /// of it, the caller's own guard skipped the other half and the keyboard stayed
+    /// captured.
+    #[test]
+    fn back_reports_closed_without_closing() {
+        let mut state = opened();
+
+        assert_eq!(state.back(), Back::Closed);
+        assert!(state.is_open());
+    }
+
+    #[test]
+    fn closing_twice_is_harmless() {
+        let mut state = opened();
+
+        state.close();
+        state.close();
+
+        assert!(!state.is_open());
+        assert_eq!(state.selected(), None);
     }
 
     #[test]
