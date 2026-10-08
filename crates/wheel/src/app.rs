@@ -19,7 +19,7 @@ use kile_wheel_platform::hooks::{self, HookThread, InputEvent, SharedInput};
 use kile_wheel_platform::icons::IconCache;
 use kile_wheel_platform::monitor::{self, Monitor, MonitorChoice};
 use kile_wheel_platform::watcher::{Watcher, WindowEvent};
-use kile_wheel_platform::{activate, launch, shell};
+use kile_wheel_platform::{activate, launch, shell, snippet};
 use tracing::{info, warn};
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -900,14 +900,8 @@ impl App {
 
     fn run_item(&mut self, item: &Item) -> Result<()> {
         if let ItemKind::Snippet { text, mode } = &item.kind {
-            // snippets land in the window that had focus, which needs the paste path
-            warn!(
-                name = %item.name,
-                mode = ?mode,
-                length = text.len(),
-                "snippet delivery is not wired up yet, so nothing was pasted"
-            );
-            return Ok(());
+            return snippet::deliver(text, *mode)
+                .with_context(|| format!("could not paste \"{}\"", item.name));
         }
 
         launch::run(&item.kind).with_context(|| format!("could not run \"{}\"", item.name))
