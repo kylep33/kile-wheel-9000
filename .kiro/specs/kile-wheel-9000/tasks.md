@@ -68,6 +68,8 @@ click activates, within the 50 ms budget.
 
 - [ ] 1.8 Icon extraction and in-memory cache
   - Extract once per group key, off the main thread
+  - Partly done: the cache is in and extraction happens once per key, but on the main
+    thread. The warm-up frame pays for it before the first open, so it is not felt
   - _Requirements: 5.1, 9.4_
 
 - [x] 1.9 Selection and activation
@@ -81,114 +83,121 @@ click activates, within the 50 ms budget.
 - [ ] 1.10 Measure and confirm the open budget
   - Instrument hook timestamp to first present and verify under 50 ms
   - Hand off for elevated testing against an elevated foreground window
+  - Partly done: instrumented and measuring 6 to 14 ms against the 50 ms budget. The
+    elevated foreground test still needs a real desktop
   - _Requirements: 9.1, 1.11_
 
 ## Phase 2 — Pinned items and indicators
 
-- [ ] 2.1 Config model, first-run default write, and atomic save
+- [x] 2.1 Config model, first-run default write, and atomic save
   - serde read, `toml_edit` write-back preserving comments, temp file then rename
   - _Requirements: 7.1, 7.2, 7.5, 6.5_
 
-- [ ] 2.2 Pinned apps placed from config at their tab and slot
+- [x] 2.2 Pinned apps placed from config at their tab and slot
   - _Requirements: 4.2, 5.2_
 
-- [ ] 2.3 Slot indicators: running pill, focused pill, multi-window pill, pin glyph
+- [x] 2.3 Slot indicators: running pill, focused pill, multi-window pill, pin glyph
   - _Requirements: 3.4_
 
-- [ ] 2.4 Empty-slot quips drawn from the configurable list
+- [x] 2.4 Empty-slot quips drawn from the configurable list
   - _Requirements: 3.2_
 
-- [ ] 2.5 Sub-wheel for an app with more than one window
+- [x] 2.5 Sub-wheel for an app with more than one window
   - Labelled by window title, "More..." past 8, Backspace returns to the parent
   - _Requirements: 5.6, 1.8_
 
-- [ ] 2.6 Shift+Enter and middle-click launch a new instance
+- [x] 2.6 Shift+Enter and middle-click launch a new instance
   - _Requirements: 5.7_
 
 ## Phase 3 — Tabs
 
-- [ ] 3.1 Tabs 1 through 9 with optional name and icon, switched by 1 through 9
+- [x] 3.1 Tabs 1 through 9 with optional name and icon, switched by 1 through 9
   - _Requirements: 4.1, 1.9_
 
 - [ ] 3.2 Overflow filling across tabs with auto-created overflow tabs
+  - Dropped: superseded by unpinned app slots. Nothing auto-fills and no tab is created
+    behind your back; a blank slot stays blank until you set it
   - _Requirements: 4.3_
 
-- [ ] 3.3 Slot stability across open and close churn
+- [x] 3.3 Slot stability across open and close churn
   - Group key to position map held while the group lives; freed slots reused on launch
   - _Requirements: 4.5, 4.6_
 
 - [ ] 3.4 "More..." in the last slot of tab 9 when everything is full
+  - Dropped: replaced by the hub overflow glyph and its note, which says how many apps
+    found no unpinned slot and what to do about it
   - _Requirements: 4.4_
 
-- [ ] 3.5 Hub shows tab number, name, icon, date and time, and the cog
+- [x] 3.5 Hub shows tab number, name, icon, date and time, and the cog
   - _Requirements: 3.3_
 
 ## Phase 4 — Remaining slot types
 
-- [ ] 4.1 Script items with `exec` template, `{path}` substitution, `cwd` and `hidden`
+- [x] 4.1 Script items with `exec` template, `{path}` substitution, `cwd` and `hidden`
   - _Requirements: 5.9_
 
-- [ ] 4.2 URL items with optional browser and browser args
+- [x] 4.2 URL items with optional browser and browser args
   - _Requirements: 5.10_
 
-- [ ] 4.3 Snippet items in clipboard and type modes
+- [x] 4.3 Snippet items in clipboard and type modes
   - Close, restore prior focus, deliver, then restore the original clipboard
   - _Requirements: 5.11_
 
-- [ ] 4.4 Folder items opening Explorer with environment variables expanded
+- [x] 4.4 Folder items opening Explorer with environment variables expanded
   - _Requirements: 5.12_
 
-- [ ] 4.5 Terminal items with profile, optional WSL distro and starting directory
+- [x] 4.5 Terminal items with profile, optional WSL distro and starting directory
   - _Requirements: 5.13_
 
 ## Phase 5 — Edit mode
 
-- [ ] 5.1 Hold for 400 ms on a slot or the cog toggles edit mode
+- [x] 5.1 Hold for 400 ms on a slot or the cog toggles edit mode
   - _Requirements: 6.1, 6.2_
 
-- [ ] 5.2 Edit-mode visual state with slot outlines and the EDIT hub label
+- [x] 5.2 Edit-mode visual state with slot outlines and the EDIT hub label
   - _Requirements: 6.3_
 
-- [ ] 5.3 Drag to move or swap, 1 through 9 while dragging to change tab
+- [x] 5.3 Drag to move or swap, 1 through 9 while dragging to change tab
   - _Requirements: 6.4_
 
-- [ ] 5.4 Pin, unpin, remove, add to an empty slot, edit a filled slot
+- [x] 5.4 Pin, unpin, remove, add to an empty slot, edit a filled slot
   - _Requirements: 6.4_
 
-- [ ] 5.5 Every edit saves immediately through the atomic writer
+- [x] 5.5 Every edit saves immediately through the atomic writer
   - _Requirements: 6.5_
 
 ## Phase 6 — Settings window and the rest of input
 
-- [ ] 6.1 `settings` binary on eframe, launched from the cog and the tray
+- [x] 6.1 `settings` binary on eframe, launched from the cog and the tray
   - _Requirements: 7.6_
 
-- [ ] 6.2 General, Hotkeys, Wheel, Tabs, Items and About pages
+- [x] 6.2 General, Hotkeys, Wheel, Tabs, Items and About pages
   - Press-to-record hotkey capture, icon picker, plain-text snippet warning
   - Backspace goes back a page, Esc closes
   - _Requirements: 7.6, 7.8, 7.9_
 
 - [ ] 6.3 Windows Terminal profile and WSL distro enumeration
+  - Not started: profile and distro are typed in by hand for now
   - _Requirements: 7.7_
 
-- [ ] 6.4 Live reload with last-good-config retention and a tray parse-error notice
+- [x] 6.4 Live reload with last-good-config retention and a tray parse-error notice
   - _Requirements: 7.3, 7.4_
 
-- [ ] 6.5 Multiple bindings including mouse buttons, and the open-also-closes toggle
+- [x] 6.5 Multiple bindings including mouse buttons, and the open-also-closes toggle
   - _Requirements: 1.2, 1.6_
 
-- [ ] 6.6 Fullscreen suppression and the monitor choice setting
+- [x] 6.6 Fullscreen suppression and the monitor choice setting
   - _Requirements: 1.11, 3.1_
 
 ## Phase 7 — Polish
 
-- [ ] 7.1 Tray icon with Open Settings, Reload Config and Quit
+- [x] 7.1 Tray icon with Open Settings, Reload Config and Quit
   - _Requirements: 8.4_
 
-- [ ] 7.2 Animations within the 100 ms ceiling, with the speed setting
+- [x] 7.2 Animations within the 100 ms ceiling, with the speed setting
   - _Requirements: 3.5, 3.6, 3.7_
 
-- [ ] 7.3 Theme settings: accent color, wheel size, opacity
+- [x] 7.3 Theme settings: accent color, wheel size, opacity
   - _Requirements: 3.8_
 
 - [ ] 7.4 Idle CPU and memory check against the targets

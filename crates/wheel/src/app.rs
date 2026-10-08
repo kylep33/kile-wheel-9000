@@ -349,8 +349,11 @@ impl App {
             return;
         }
         if code == keys::ENTER {
-            let activated = self.activate();
-            log_failure(activated);
+            // Shift+Enter is a second instance rather than a focus, matching the taskbar
+            match modifiers.shift {
+                true => self.launch_new_instance(),
+                false => log_failure(self.activate()),
+            }
             return;
         }
 
@@ -886,6 +889,11 @@ impl App {
             None => SlotView::default(),
         });
 
+        // the wheel has eight slots, so a ninth window has nowhere to go; say so rather
+        // than quietly dropping it
+        let hidden = windows.len().saturating_sub(Slot::COUNT);
+        let note = hidden_windows_note(hidden);
+
         self.overlay.draw(&Frame {
             slots,
             selected: self.state.selected(),
@@ -895,11 +903,11 @@ impl App {
                 tab_line: "WINDOWS",
                 clock: None,
                 date: None,
-                overflow_note: None,
+                overflow_note: note.as_deref(),
             },
             edit_mode: false,
             dragging: None,
-            overflow: 0,
+            overflow: hidden,
             form: None,
         })
     }
@@ -1083,6 +1091,22 @@ fn quip(quips: &[String], tab: Tab, slot: Slot) -> &str {
     quips[spread % quips.len()].as_str()
 }
 
+/// Says how many of an app's windows did not fit on the sub-wheel, so a ninth window is
+/// never dropped without a word. `None` when they all fit.
+fn hidden_windows_note(hidden: usize) -> Option<String> {
+    if hidden == 0 {
+        return None;
+    }
+
+    let plural = match hidden {
+        1 => "window",
+        _ => "windows",
+    };
+    Some(format!(
+        "{hidden} more {plural} open. Alt-Tab reaches the rest."
+    ))
+}
+
 /// Says what the overflow glyph means, since a glyph on its own does not explain itself.
 /// `None` when nothing overflowed, which is also when the glyph is not drawn.
 fn overflow_note(overflow: usize) -> Option<String> {
@@ -1206,5 +1230,22 @@ mod tests {
     fn the_overflow_note_says_what_to_do_about_it() {
         let note = overflow_note(2).expect("two apps overflowed");
         assert!(note.contains("unpinned app slots"), "{note}");
+    }
+
+    #[test]
+    fn windows_that_all_fit_say_nothing() {
+        assert_eq!(hidden_windows_note(0), None);
+    }
+
+    #[test]
+    fn one_hidden_window_reads_as_singular() {
+        let note = hidden_windows_note(1).expect("one window hidden");
+        assert!(note.starts_with("1 more window "), "{note}");
+    }
+
+    #[test]
+    fn several_hidden_windows_read_as_plural() {
+        let note = hidden_windows_note(4).expect("four windows hidden");
+        assert!(note.starts_with("4 more windows "), "{note}");
     }
 }
