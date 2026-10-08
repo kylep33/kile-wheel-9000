@@ -338,7 +338,7 @@ impl Renderer {
             label_colour,
         );
 
-        self.draw_indicators(label_centre, view);
+        self.draw_indicators(centre, bearing, label_centre, view);
     }
 
     fn draw_slot_number(&self, centre: Vector2, slot: Slot, bearing: f32, selected: bool) {
@@ -387,23 +387,26 @@ impl Renderer {
         };
     }
 
-    /// Mirrors the taskbar: a pill for running, a longer one for focused, a second pill
-    /// for more than one window, and a pin glyph for a pinned slot.
-    fn draw_indicators(&self, label_centre: Vector2, view: SlotView<'_>) {
+    /// Mirrors the taskbar: a pill under a running app, a longer brighter one when it has
+    /// focus, a second pill for more than one window, and an accent pin for a pinned slot.
+    ///
+    /// The pin sits on the wedge's own bisector between the number and the icon, so it
+    /// cannot collide with a neighbour's label however long the names get.
+    fn draw_indicators(
+        &self,
+        centre: Vector2,
+        bearing: f32,
+        label_centre: Vector2,
+        view: SlotView<'_>,
+    ) {
         if view.pinned {
-            let at = Vector2 {
-                X: label_centre.X + self.metrics.label_box_px / 2.0 - self.metrics.number_size_px,
-                Y: label_centre.Y - self.metrics.label_size_px,
-            };
+            let at = on_circle(centre, self.metrics.pin_radius_px, bearing);
+            let box_px = self.metrics.number_size_px * 2.0;
             self.draw_text(
                 theme::PIN_GLYPH,
-                box_around(
-                    at,
-                    self.metrics.number_size_px * 2.0,
-                    self.metrics.number_size_px * 2.0,
-                ),
+                box_around(at, box_px, box_px),
                 self.fonts.glyph(),
-                &self.palette.accent_dim,
+                &self.palette.accent,
             );
         }
 
@@ -411,23 +414,31 @@ impl Renderer {
             return;
         }
 
-        let width = match view.focused {
-            true => self.metrics.label_box_px * RUNNING_PILL_FOCUSED_RATIO,
-            false => self.metrics.label_box_px * RUNNING_PILL_WIDTH_RATIO,
+        // the focused app gets the longer, brighter pill, as on the taskbar
+        let (width, colour) = match view.focused {
+            true => (
+                self.metrics.label_box_px * RUNNING_PILL_FOCUSED_RATIO,
+                &self.palette.accent,
+            ),
+            false => (
+                self.metrics.label_box_px * RUNNING_PILL_WIDTH_RATIO,
+                &self.palette.running,
+            ),
         };
         let top = label_centre.Y + self.metrics.label_size_px + RUNNING_PILL_GAP_PX;
-        self.fill_pill(label_centre.X, top, width);
+        self.fill_pill(label_centre.X, top, width, colour);
 
         if view.window_count > 1 {
             self.fill_pill(
                 label_centre.X,
                 top + RUNNING_PILL_HEIGHT_PX + MULTI_WINDOW_PILL_GAP_PX,
-                width * RUNNING_PILL_WIDTH_RATIO / RUNNING_PILL_FOCUSED_RATIO,
+                self.metrics.label_box_px * RUNNING_PILL_WIDTH_RATIO,
+                colour,
             );
         }
     }
 
-    fn fill_pill(&self, centre_x: f32, top: f32, width: f32) {
+    fn fill_pill(&self, centre_x: f32, top: f32, width: f32, colour: &D2D1_COLOR_F) {
         let bounds = D2D_RECT_F {
             left: centre_x - width / 2.0,
             top,
@@ -436,10 +447,7 @@ impl Renderer {
         };
 
         // SAFETY: the bounds and brush are live for the duration of the call.
-        unsafe {
-            self.context
-                .FillRectangle(&bounds, self.brush(&self.palette.accent))
-        };
+        unsafe { self.context.FillRectangle(&bounds, self.brush(colour)) };
     }
 
     fn draw_hub(&self, centre: Vector2, frame: &Frame<'_>) {

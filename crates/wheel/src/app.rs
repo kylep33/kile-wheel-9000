@@ -300,13 +300,17 @@ impl App {
             consumed: false,
         });
 
-        if slot.is_some() || on_cog {
-            self.overlay.start_hold_timer(EDIT_HOLD_MS);
-        }
+        // in edit mode a press on a slot starts a drag, and the hold clock must not run
+        // alongside it: a deliberate drag takes longer than the hold, so the hold would
+        // leave edit mode and swallow the drop. The hold still works on the hub and on
+        // empty space, and Backspace always leaves edit mode.
         if let Some(slot) = slot.filter(|_| self.state.edit_mode()) {
             self.state.begin_drag(slot);
             self.redraw = true;
+            return;
         }
+
+        self.overlay.start_hold_timer(EDIT_HOLD_MS);
     }
 
     fn end_press(&mut self) {
@@ -369,20 +373,44 @@ impl App {
         let mut document = ConfigDocument::load(&self.paths.config_file())
             .context("could not open the config to record the move")?;
 
-        // only a pinned item has a config entry to move; a running app has nowhere to
-        // write its slot to, so dragging one pins it first
         if !document.move_item(from, to) {
-            let Some(entry) = self.layout.get(from.tab, from.slot) else {
-                return Ok(());
-            };
-            let Some(item) = pin_as_item(entry, to) else {
-                return Ok(());
-            };
-            document.upsert_item(&item)?;
+            self.pin_dropped_app(&mut document, from, to)?;
         }
 
         document.save().context("could not save the moved item")?;
+        info!(
+            from = %describe(from),
+            to = %describe(to),
+            "moved a slot"
+        );
         self.reload_config()
+    }
+
+    /// Nothing is pinned at `from`, so this is a running app being dropped somewhere.
+    /// Pinning it is what records the move; anything already pinned at `to` trades places
+    /// with it rather than being overwritten.
+    fn pin_dropped_app(
+        &self,
+        document: &mut ConfigDocument,
+        from: Position,
+        to: Position,
+    ) -> Result<()> {
+        let Some(entry) = self.layout.get(from.tab, from.slot) else {
+            info!(from = %describe(from), "that slot is empty, so there was nothing to move");
+            return Ok(());
+        };
+        let Some(item) = pin_as_item(entry, to) else {
+            warn!(
+                label = %entry.label,
+                "that slot cannot be pinned, so the drop was dropped"
+            );
+            return Ok(());
+        };
+
+        document.move_item(to, from);
+        document.upsert_item(&item)?;
+        info!(label = %item.name, to = %describe(to), "pinned a running app");
+        Ok(())
     }
 
     fn open_settings(&mut self) -> Result<()> {
@@ -391,6 +419,13 @@ impl App {
         let exe = std::env::current_exe()
             .context("could not find our own folder to look for the settings window in")?
             .with_file_name(SETTINGS_EXE);
+
+        if !exe.exists() {
+            anyhow::bail!(
+                "{} is not beside the wheel; re-run install.ps1 to put it there",
+                exe.display()
+            );
+        }
 
         shell::execute(&shell::Command::new(exe.to_string_lossy().into_owned()))
             .context("could not start the settings window")
@@ -713,9 +748,17 @@ impl App {
 }
 
 /// Turns a running app into a pinned entry, which is what dragging one does.
+///
+/// Packaged apps are pinned through the Apps folder, because their executable path is not
+/// what the shell launches them by.
 fn pin_as_item(entry: &SlotEntry, to: Position) -> Option<Item> {
-    let SlotTarget::Running(AppKey::Executable(path)) = &entry.target else {
+    let SlotTarget::Running(key) = &entry.target else {
         return None;
+    };
+
+    let target = match key {
+        AppKey::Executable(path) => path.to_string_lossy().into_owned(),
+        AppKey::UserModelId(id) => format!(r"shell:AppsFolder\{id}"),
     };
 
     Some(Item {
@@ -723,10 +766,17 @@ fn pin_as_item(entry: &SlotEntry, to: Position) -> Option<Item> {
         icon: None,
         tab: to.tab.number(),
         slot: to.slot.index(),
-        kind: ItemKind::App {
-            target: path.to_string_lossy().into_owned(),
-        },
+        kind: ItemKind::App { target },
     })
+}
+
+/// For log lines, so a move reads as the tab and slot you dragged between.
+fn describe(position: Position) -> String {
+    format!(
+        "tab {} slot {}",
+        position.tab.number(),
+        position.slot.index()
+    )
 }
 
 /// An empty slot shows the same quip for as long as the wheel stays on that tab, so the

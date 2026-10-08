@@ -1,26 +1,36 @@
-//! Handing work to Explorer, so launched programs do not inherit our admin token.
+//! Starting programs at the shell's integrity level.
 //!
-//! This process runs elevated so UIPI cannot block the input hooks, which means a plain
-//! `ShellExecute` from here would give every launched app an admin token. Asking the
-//! running, unelevated Explorer to do it keeps children at the user's normal level.
+//! This process runs elevated so UIPI cannot block the input hooks. Anything it started
+//! directly would inherit that admin token, so launches borrow a primary token from the
+//! Explorer that owns the desktop and start the child with that instead.
+//!
+//! An earlier attempt walked Explorer's desktop view to `IShellDispatch2`. That failed
+//! with `E_NOINTERFACE` in practice, because it needs an active shell view on the
+//! desktop, which is not something a launcher can rely on.
 
 use thiserror::Error;
-use windows::Win32::System::Com::{CLSCTX_LOCAL_SERVER, CoCreateInstance, IServiceProvider};
-use windows::Win32::System::Variant::VARIANT;
-use windows::Win32::UI::Shell::{
-    IShellBrowser, IShellDispatch2, IShellFolderViewDual, IShellView, IShellWindows,
-    SID_STopLevelBrowser, SVGIO_BACKGROUND, SWC_DESKTOP, SWFO_NEEDDISPATCH, ShellWindows,
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Security::{
+    DuplicateTokenEx, SECURITY_ATTRIBUTES, SecurityImpersonation, TOKEN_ALL_ACCESS,
+    TOKEN_DUPLICATE, TOKEN_QUERY, TokenPrimary,
 };
-use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
-use windows::core::{BSTR, Interface};
+use windows::Win32::System::Threading::{
+    CREATE_UNICODE_ENVIRONMENT, CreateProcessWithTokenW, OpenProcess, OpenProcessToken,
+    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, STARTF_USESHOWWINDOW, STARTUPINFOW,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetShellWindow, GetWindowThreadProcessId, SW_HIDE, SW_SHOWNORMAL,
+};
+use windows::core::{HSTRING, PCWSTR, PWSTR};
 
-/// Win32 `CSIDL_DESKTOP`, the shell folder whose view hosts the Application object.
-const CSIDL_DESKTOP: i32 = 0;
+/// Explorer resolves anything a double-click would: urls, folders, shortcuts, documents
+/// and `shell:AppsFolder\<AppUserModelID>`.
+const EXPLORER_EXE: &str = "explorer.exe";
 
 /// What to run.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Command {
-    pub file: String,
+    pub program: String,
     pub arguments: Option<String>,
     pub working_dir: Option<String>,
     /// Starts with no window, for a script that only needs to do its work.
@@ -28,9 +38,9 @@ pub struct Command {
 }
 
 impl Command {
-    pub fn new(file: impl Into<String>) -> Self {
+    pub fn new(program: impl Into<String>) -> Self {
         Self {
-            file: file.into(),
+            program: program.into(),
             ..Self::default()
         }
     }
@@ -49,92 +59,212 @@ impl Command {
         self.hidden = hidden;
         self
     }
+
+    /// The command line Windows parses, with the program quoted so a path containing
+    /// spaces stays one argument.
+    fn line(&self) -> String {
+        match &self.arguments {
+            Some(arguments) => format!("\"{}\" {arguments}", self.program),
+            None => format!("\"{}\"", self.program),
+        }
+    }
 }
 
 #[derive(Debug, Error)]
 pub enum ShellError {
     #[error(
-        "could not reach Explorer to run the launch: {source}; without it a launched app would inherit this process's admin token, so nothing was started"
+        "could not find the Explorer that owns the desktop, so there is no unelevated token to launch with; nothing was started"
     )]
-    Unreachable {
+    NoShell,
+
+    #[error(
+        "could not borrow the shell's token: {source}; without it a launched app would inherit this process's admin token, so nothing was started"
+    )]
+    NoToken {
         #[source]
         source: windows::core::Error,
     },
 
-    #[error("could not start \"{file}\": {source}; check the path exists and is runnable")]
+    #[error("could not start \"{program}\": {source}; check the path exists and is runnable")]
     Failed {
-        file: String,
+        program: String,
         #[source]
         source: windows::core::Error,
     },
 }
 
-/// Runs the command through Explorer.
+/// Closes the handle it holds, so an early return cannot leak it.
+#[derive(Debug)]
+struct OwnedHandle(HANDLE);
+
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from a call that hands ownership over, and Drop runs
+        // exactly once.
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// Runs the command with the shell's token, so the child is not elevated.
 pub fn execute(command: &Command) -> Result<(), ShellError> {
-    let shell = dispatch().map_err(|source| ShellError::Unreachable { source })?;
-    let show = match command.hidden {
-        true => SW_HIDE.0,
-        false => SW_SHOWNORMAL.0,
+    let token = shell_token()?;
+    let mut line = wide(&command.line());
+    let working_dir = command
+        .working_dir
+        .as_ref()
+        .map(|path| HSTRING::from(path.as_str()));
+    let current_dir = working_dir
+        .as_ref()
+        .map_or(PCWSTR::null(), |path| PCWSTR(path.as_ptr()));
+
+    let startup = STARTUPINFOW {
+        cb: size_of::<STARTUPINFOW>() as u32,
+        dwFlags: STARTF_USESHOWWINDOW,
+        wShowWindow: show_flag(command.hidden),
+        ..Default::default()
+    };
+    let mut process = PROCESS_INFORMATION::default();
+
+    // SAFETY: the command line is a mutable, null-terminated buffer that outlives the
+    // call, which is what CreateProcessWithTokenW requires of it.
+    let started = unsafe {
+        CreateProcessWithTokenW(
+            token.0,
+            Default::default(),
+            PCWSTR::null(),
+            Some(PWSTR(line.as_mut_ptr())),
+            CREATE_UNICODE_ENVIRONMENT,
+            None,
+            current_dir,
+            &startup,
+            &raw mut process,
+        )
     };
 
-    // SAFETY: every argument stays live for the duration of the call.
-    unsafe {
-        shell.ShellExecute(
-            &BSTR::from(command.file.as_str()),
-            &optional_variant(command.arguments.as_deref()),
-            &optional_variant(command.working_dir.as_deref()),
-            &VARIANT::default(),
-            &VARIANT::from(show),
-        )
-    }
-    .map_err(|source| ShellError::Failed {
-        file: command.file.clone(),
+    // the child runs on its own; we only hold these to avoid leaking them
+    close_if_set(process.hProcess);
+    close_if_set(process.hThread);
+
+    started.map_err(|source| ShellError::Failed {
+        program: command.program.clone(),
         source,
     })
 }
 
-/// Walks from the Explorer desktop view to the shell Application object it hosts.
-fn dispatch() -> windows::core::Result<IShellDispatch2> {
-    // SAFETY: CLSCTX_LOCAL_SERVER binds to the already running Explorer rather than
-    // starting a new, elevated server inside this process.
-    let shell_windows: IShellWindows =
-        unsafe { CoCreateInstance(&ShellWindows, None, CLSCTX_LOCAL_SERVER) }?;
-
-    let location = VARIANT::from(CSIDL_DESKTOP);
-    let any_root = VARIANT::default();
-    let mut desktop_window = 0i32;
-
-    // SAFETY: all three pointers target live locals for the duration of the call.
-    let desktop = unsafe {
-        shell_windows.FindWindowSW(
-            &raw const location,
-            &raw const any_root,
-            SWC_DESKTOP,
-            &mut desktop_window,
-            SWFO_NEEDDISPATCH,
-        )
-    }?;
-
-    let provider: IServiceProvider = desktop.cast()?;
-
-    // SAFETY: the desktop dispatch is live for the rest of this function.
-    let browser: IShellBrowser = unsafe { provider.QueryService(&SID_STopLevelBrowser) }?;
-
-    // SAFETY: the browser is live.
-    let view: IShellView = unsafe { browser.QueryActiveShellView() }?;
-
-    // SAFETY: the view background item is the folder view that owns Application.
-    let folder_view: IShellFolderViewDual = unsafe { view.GetItemObject(SVGIO_BACKGROUND) }?;
-
-    // SAFETY: the Application object it returns is the shell's own, which is what keeps
-    // the launch unelevated.
-    let application = unsafe { folder_view.Application() }?;
-    application.cast()
+/// Hands a single path, url or shell item to Explorer to resolve, exactly as a
+/// double-click would.
+pub fn open_shell_item(target: &str) -> Result<(), ShellError> {
+    execute(&Command::new(EXPLORER_EXE).with_arguments(Some(format!("\"{target}\""))))
 }
 
-fn optional_variant(text: Option<&str>) -> VARIANT {
-    match text {
-        Some(text) => VARIANT::from(BSTR::from(text)),
-        None => VARIANT::default(),
+/// A primary token copied from the Explorer that owns the desktop.
+fn shell_token() -> Result<OwnedHandle, ShellError> {
+    let process_id = shell_process_id().ok_or(ShellError::NoShell)?;
+
+    // SAFETY: the handle is owned and closed when the guard drops.
+    let shell = OwnedHandle(
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }
+            .map_err(|source| ShellError::NoToken { source })?,
+    );
+
+    let mut opened = HANDLE::default();
+
+    // SAFETY: the out-pointer targets a live local.
+    unsafe { OpenProcessToken(shell.0, TOKEN_DUPLICATE | TOKEN_QUERY, &raw mut opened) }
+        .map_err(|source| ShellError::NoToken { source })?;
+    let opened = OwnedHandle(opened);
+
+    let mut primary = HANDLE::default();
+
+    // SAFETY: a primary token is what CreateProcessWithTokenW needs; an impersonation
+    // token would be refused.
+    unsafe {
+        DuplicateTokenEx(
+            opened.0,
+            TOKEN_ALL_ACCESS,
+            None::<*const SECURITY_ATTRIBUTES>,
+            SecurityImpersonation,
+            TokenPrimary,
+            &raw mut primary,
+        )
+    }
+    .map_err(|source| ShellError::NoToken { source })?;
+
+    Ok(OwnedHandle(primary))
+}
+
+/// The Explorer that owns the desktop, which is the shell running at the user's normal
+/// integrity level.
+fn shell_process_id() -> Option<u32> {
+    // SAFETY: returns a borrowed handle or null, no pointers involved.
+    let desktop = unsafe { GetShellWindow() };
+    if desktop.is_invalid() {
+        return None;
+    }
+
+    let mut process_id = 0;
+
+    // SAFETY: the pointer targets a live local for the duration of the call.
+    unsafe { GetWindowThreadProcessId(desktop, Some(&raw mut process_id)) };
+    (process_id != 0).then_some(process_id)
+}
+
+fn show_flag(hidden: bool) -> u16 {
+    match hidden {
+        true => SW_HIDE.0 as u16,
+        false => SW_SHOWNORMAL.0 as u16,
+    }
+}
+
+fn close_if_set(handle: HANDLE) {
+    if handle.is_invalid() {
+        return;
+    }
+
+    // SAFETY: CreateProcessWithTokenW hands ownership of both handles over.
+    let _ = unsafe { CloseHandle(handle) };
+}
+
+/// A null-terminated, mutable UTF-16 buffer.
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_program_without_arguments_is_quoted_on_its_own() {
+        let command = Command::new(r"C:\Program Files\App\app.exe");
+
+        assert_eq!(command.line(), r#""C:\Program Files\App\app.exe""#);
+    }
+
+    #[test]
+    fn arguments_follow_the_quoted_program() {
+        let command = Command::new("wt.exe").with_arguments(Some("-p \"Ubuntu\"".to_owned()));
+
+        assert_eq!(command.line(), r#""wt.exe" -p "Ubuntu""#);
+    }
+
+    #[test]
+    fn blank_arguments_are_treated_as_absent() {
+        let command = Command::new("app.exe").with_arguments(Some("   ".to_owned()));
+
+        assert_eq!(command.arguments, None);
+        assert_eq!(command.line(), r#""app.exe""#);
+    }
+
+    #[test]
+    fn blank_working_directories_are_treated_as_absent() {
+        let command = Command::new("app.exe").in_directory(Some(String::new()));
+
+        assert_eq!(command.working_dir, None);
+    }
+
+    #[test]
+    fn a_wide_string_is_null_terminated() {
+        assert_eq!(wide("hi"), [u16::from(b'h'), u16::from(b'i'), 0]);
     }
 }

@@ -15,6 +15,7 @@ const WINDOW_MARGIN_PX: f32 = 12.0;
 
 const HUB_RADIUS_RATIO: f32 = 0.185;
 const NUMBER_RADIUS_RATIO: f32 = 0.255;
+const PIN_RADIUS_RATIO: f32 = 0.345;
 const ICON_RADIUS_RATIO: f32 = 0.455;
 const LABEL_RADIUS_RATIO: f32 = 0.635;
 const LABEL_BOX_RATIO: f32 = 0.52;
@@ -60,6 +61,7 @@ pub struct Metrics {
     pub radius_px: f32,
     pub hub_radius_px: f32,
     pub number_radius_px: f32,
+    pub pin_radius_px: f32,
     pub icon_radius_px: f32,
     pub label_radius_px: f32,
     pub label_box_px: f32,
@@ -86,6 +88,7 @@ impl Metrics {
             radius_px,
             hub_radius_px: radius_px * HUB_RADIUS_RATIO,
             number_radius_px: radius_px * NUMBER_RADIUS_RATIO,
+            pin_radius_px: radius_px * PIN_RADIUS_RATIO,
             icon_radius_px: radius_px * ICON_RADIUS_RATIO,
             label_radius_px: radius_px * LABEL_RADIUS_RATIO,
             label_box_px: radius_px * LABEL_BOX_RATIO,
@@ -257,7 +260,8 @@ mod tests {
         let metrics = Metrics::new(USER_DEFAULT_DPI, 1.0);
 
         assert!(metrics.hub_radius_px < metrics.number_radius_px);
-        assert!(metrics.number_radius_px < metrics.icon_radius_px);
+        assert!(metrics.number_radius_px < metrics.pin_radius_px);
+        assert!(metrics.pin_radius_px < metrics.icon_radius_px);
         assert!(metrics.icon_radius_px < metrics.label_radius_px);
         assert!(metrics.label_radius_px < metrics.radius_px);
     }
