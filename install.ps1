@@ -146,15 +146,23 @@ function Invoke-ReleaseBuild {
     & cargo build --release --locked --target $RustTarget --manifest-path $Manifest
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed (exit $LASTEXITCODE). Fix the build errors above and re-run." }
 
-    $binary = Join-Path $PSScriptRoot "target\$RustTarget\release\$AppName.exe"
-    if (-not (Test-Path $binary)) { throw "build reported success but $binary is missing." }
-    return $binary
+    $built = Join-Path $PSScriptRoot "target\$RustTarget\release"
+    foreach ($name in @("$AppName.exe", $SettingsExe)) {
+        $path = Join-Path $built $name
+        if (-not (Test-Path $path)) { throw "build reported success but $path is missing." }
+    }
+    return $built
 }
 
-function Install-Binary($binary) {
+# the settings window sits beside the wheel, which is where the wheel looks for it
+function Install-Binaries($builtDir) {
     Write-Step "installing to $InstallDir"
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    Copy-Item -Path $binary -Destination (Join-Path $InstallDir "$AppName.exe") -Force
+
+    foreach ($name in @("$AppName.exe", $SettingsExe)) {
+        Copy-Item -Path (Join-Path $builtDir $name) -Destination (Join-Path $InstallDir $name) -Force
+        Write-Detail "  $name"
+    }
 }
 
 # config.toml is written by the app on first run so the schema lives in one place
@@ -182,6 +190,7 @@ function Write-Summary($version, $exePath) {
     Write-Host ''
     Write-Host "$DisplayName $version installed" -ForegroundColor Green
     Write-Detail "binary:   $exePath"
+    Write-Detail "settings: $(Join-Path $InstallDir $SettingsExe)"
     Write-Detail "config:   $ConfigDir"
     Write-Detail "startup:  scheduled task '$TaskName' (highest privileges, at logon)"
     Write-Detail "hotkey:   $DefaultHotkey opens the wheel"
@@ -203,8 +212,8 @@ $version = Get-WheelVersion
 # the linker is about to write
 Stop-AppInstance
 
-$binary = Invoke-ReleaseBuild
-Install-Binary $binary
+$binaries = Invoke-ReleaseBuild
+Install-Binaries $binaries
 Install-ConfigDirs
 
 $exePath = Join-Path $InstallDir "$AppName.exe"

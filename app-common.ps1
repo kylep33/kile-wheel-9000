@@ -12,6 +12,7 @@ $script:DisplayName = 'Kile Wheel 9000'
 $script:DefaultHotkey = 'Caps Lock'
 
 $script:WheelPackage = 'kile-wheel-9000'
+$script:SettingsExe = 'kile-wheel-9000-settings.exe'
 $script:RustTarget = 'x86_64-pc-windows-msvc'
 $script:TaskName = $script:DisplayName
 $script:StopTimeout_s = 10
@@ -51,7 +52,8 @@ function Find-Executable($name) {
 
 # force-kill is fine: the overlay has no main window to close, and config writes are atomic
 function Stop-AppInstance {
-    $running = @(Get-Process -Name $script:AppName -ErrorAction SilentlyContinue)
+    $names = @($script:AppName, [IO.Path]::GetFileNameWithoutExtension($script:SettingsExe))
+    $running = @(Get-Process -Name $names -ErrorAction SilentlyContinue)
     if ($running.Count -eq 0) { return }
 
     Write-Step "stopping running $script:DisplayName"

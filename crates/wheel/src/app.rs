@@ -13,6 +13,7 @@ use kile_wheel_core::names::{ConfigPaths, SETTINGS_EXE};
 use kile_wheel_core::select::{self, Offset, held};
 use kile_wheel_core::slot::{Slot, Tab};
 use kile_wheel_platform::apps::{AppKey, WindowModel};
+use kile_wheel_platform::config_watch::ConfigWatcher;
 use kile_wheel_platform::hooks::{self, HookThread, InputEvent, SharedInput};
 use kile_wheel_platform::icons::IconCache;
 use kile_wheel_platform::monitor::{self, Monitor, MonitorChoice};
@@ -54,6 +55,7 @@ pub struct App {
     overlay: Overlay,
     model: WindowModel,
     watcher: Watcher,
+    config_watch: Option<ConfigWatcher>,
     state: WheelState,
     memory: SlotMemory<AppKey>,
     layout: Layout,
@@ -88,12 +90,26 @@ impl App {
             .context("could not enumerate the open windows")?;
         info!(apps = model.groups().len(), "window model built");
 
+        // a watch that fails to start costs live reload, not the whole launcher
+        let config_watch = match ConfigWatcher::start(
+            &paths.config_file(),
+            overlay.window(),
+            overlay::WM_CONFIG_CHANGED,
+        ) {
+            Ok(watch) => Some(watch),
+            Err(error) => {
+                warn!("config changes will need a restart to apply: {error}");
+                None
+            }
+        };
+
         let mut app = Self {
             _hooks: hooks,
             shared,
             overlay,
             model,
             watcher,
+            config_watch,
             state: WheelState::default(),
             memory: SlotMemory::default(),
             layout: Layout::default(),
@@ -146,6 +162,25 @@ impl App {
         }
         if message.message == WM_TIMER {
             self.hold_elapsed();
+            return;
+        }
+        if message.message == overlay::WM_CONFIG_CHANGED {
+            self.absorb_config_change();
+        }
+    }
+
+    /// A bad edit keeps the config already in memory, so a typo cannot take the wheel out.
+    fn absorb_config_change(&mut self) {
+        let Some(watch) = &self.config_watch else {
+            return;
+        };
+        if !watch.take_change() {
+            return;
+        }
+
+        match self.reload_config() {
+            Ok(()) => info!("reloaded the config"),
+            Err(error) => warn!("keeping the last good config: {error:#}"),
         }
     }
 

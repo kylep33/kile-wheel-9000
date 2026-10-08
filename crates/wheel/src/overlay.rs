@@ -23,6 +23,9 @@ const WINDOW_CLASS: &str = "kile-wheel-9000.overlay";
 /// Asks an already running instance to open its wheel.
 pub const WM_OPEN_WHEEL: u32 = WM_APP + 2;
 
+/// Posted by the config watcher when the file on disk changed.
+pub const WM_CONFIG_CHANGED: u32 = WM_APP + 3;
+
 /// The one timer this window uses, for the click-and-hold that toggles edit mode.
 const HOLD_TIMER: usize = 1;
 
