@@ -38,10 +38,23 @@ function Test-Elevated {
 # relaunches the calling script elevated and exits; -NoExit keeps the output readable
 function Invoke-SelfElevate($scriptDir, $scriptName, $forwardedArgs) {
     Write-Step 'elevating'
-    $script = Join-Path $scriptDir $scriptName
-    $arguments = @('-NoExit', '-ExecutionPolicy', 'Bypass', '-File', "`"$script`"") + $forwardedArgs
+    $arguments = Get-ElevationArguments $scriptDir $scriptName $forwardedArgs
     Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -Verb RunAs
     exit 0
+}
+
+# built separately so it can be checked without triggering a UAC prompt.
+# the switches are appended one at a time because PowerShell turns an empty array
+# returned from a function into $null, and a null element makes ArgumentList reject the
+# whole list.
+function Get-ElevationArguments($scriptDir, $scriptName, $forwardedArgs) {
+    $script = Join-Path $scriptDir $scriptName
+    $arguments = @('-NoExit', '-ExecutionPolicy', 'Bypass', '-File', "`"$script`"")
+
+    foreach ($argument in $forwardedArgs) {
+        if ($argument) { $arguments += $argument }
+    }
+    return , $arguments
 }
 
 function Find-Executable($name) {
