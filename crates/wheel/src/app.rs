@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use chrono::Local;
 use kile_wheel_core::binding::{Action, KeyCode, Modifiers, MouseButton, keys};
 use kile_wheel_core::config::{Config, ConfigDocument, MonitorTarget};
-use kile_wheel_core::item::{Item, ItemKind, Position};
+use kile_wheel_core::item::{AppCandidate, Item, ItemKind, Position};
 use kile_wheel_core::layout::SlotMemory;
 use kile_wheel_core::names::{ConfigPaths, SETTINGS_EXE};
 use kile_wheel_core::select::{self, Offset, held};
@@ -17,6 +17,7 @@ use kile_wheel_platform::clipboard;
 use kile_wheel_platform::config_watch::ConfigWatcher;
 use kile_wheel_platform::hooks::{self, HookThread, InputEvent, SharedInput};
 use kile_wheel_platform::icons::IconCache;
+use kile_wheel_platform::installed;
 use kile_wheel_platform::monitor::{self, Monitor, MonitorChoice};
 use kile_wheel_platform::watcher::{Watcher, WindowEvent};
 use kile_wheel_platform::{activate, launch, shell, snippet};
@@ -440,10 +441,37 @@ impl App {
                 // a running app or an empty unpinned slot is still an unpinned slot entry
                 _ => Form::editing(tab, slot, &unpinned_item(tab, slot)),
             },
-            None => Form::picking(tab, slot),
+            None => Form::picking(tab, slot, self.app_candidates()),
         });
         self.redraw = true;
         self.drive_animation();
+    }
+
+    /// Apps the picker can offer: the taskbar pins first, then anything running that is not
+    /// already one of them.
+    ///
+    /// Gathered fresh on each open rather than cached, because the running list changes
+    /// under you and a stale pin list would offer something you just unpinned.
+    fn app_candidates(&self) -> Vec<AppCandidate> {
+        let mut candidates = installed::taskbar_pins();
+        let pinned_names: Vec<String> = candidates
+            .iter()
+            .map(|candidate| candidate.name.to_lowercase())
+            .collect();
+
+        let running = self.model.groups().into_iter().filter_map(|group| {
+            let name = group.windows.first()?.title.to_owned();
+            match pinned_names.contains(&name.to_lowercase()) {
+                true => None,
+                false => Some(AppCandidate {
+                    name,
+                    target: launch_target(group.key),
+                }),
+            }
+        });
+
+        candidates.extend(running);
+        candidates
     }
 
     fn close_form(&mut self) {
@@ -1093,18 +1121,12 @@ fn glyph_for(kind: &ItemKind) -> &'static str {
 }
 
 /// Turns a running app into a pinned entry, which is what dragging one does.
-///
-/// Packaged apps are pinned through the Apps folder, because their executable path is not
-/// what the shell launches them by.
 fn pin_as_item(entry: &SlotEntry, to: Position) -> Option<Item> {
     let SlotTarget::Running(key) = &entry.target else {
         return None;
     };
 
-    let target = match key {
-        AppKey::Executable(path) => path.to_string_lossy().into_owned(),
-        AppKey::UserModelId(id) => format!(r"shell:AppsFolder\{id}"),
-    };
+    let target = launch_target(key);
 
     Some(Item {
         name: entry.label.clone(),
@@ -1113,6 +1135,17 @@ fn pin_as_item(entry: &SlotEntry, to: Position) -> Option<Item> {
         slot: to.slot.index(),
         kind: ItemKind::App { target },
     })
+}
+
+/// What the shell launches a running app by.
+///
+/// Packaged apps go through the Apps folder, because their executable path is not what
+/// starts them.
+fn launch_target(key: &AppKey) -> String {
+    match key {
+        AppKey::Executable(path) => path.to_string_lossy().into_owned(),
+        AppKey::UserModelId(id) => format!(r"shell:AppsFolder\{id}"),
+    }
 }
 
 /// For log lines, so a move reads as the tab and slot you dragged between.

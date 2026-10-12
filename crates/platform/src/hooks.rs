@@ -477,7 +477,7 @@ fn hook_state(code: i32) -> Option<&'static SharedInput> {
 }
 
 fn current_modifiers() -> Modifiers {
-    let tracked = TRACKED_MODIFIERS.with(|held| held.get());
+    let tracked = tracked_modifiers();
 
     // the two sources are OR'ed because neither is complete on its own: a key this hook
     // swallowed never reaches the async state table, and a key already down before the
@@ -488,6 +488,13 @@ fn current_modifiers() -> Modifiers {
         alt: tracked.alt || is_down(VK_MENU),
         win: tracked.win || is_down(VK_LWIN) || is_down(VK_RWIN),
     }
+}
+
+/// Only what this hook has seen, with no reference to the real keyboard. Split out from
+/// [`current_modifiers`] so it can be tested without a physically held key deciding the
+/// answer.
+fn tracked_modifiers() -> Modifiers {
+    TRACKED_MODIFIERS.with(|held| held.get())
 }
 
 std::thread_local! {
@@ -621,15 +628,15 @@ mod tests {
     /// The reason this tracker exists: a swallowed Shift never reaches the async key state
     /// table, so the form would see no Shift and type a lower-case letter.
     #[test]
-    fn a_tracked_shift_is_reported_even_though_windows_never_saw_it() {
+    fn a_tracked_shift_is_remembered_even_though_windows_never_saw_it() {
         on_hook_thread(|| {
-            assert!(!current_modifiers().shift, "no shift should be down yet");
+            assert!(!tracked_modifiers().shift, "nothing tracked yet");
 
             note_modifier(KeyCode(VK_LSHIFT.0), true);
-            assert!(current_modifiers().shift, "the press should be tracked");
+            assert!(tracked_modifiers().shift, "the press should be tracked");
 
             note_modifier(KeyCode(VK_LSHIFT.0), false);
-            assert!(!current_modifiers().shift, "the release should clear it");
+            assert!(!tracked_modifiers().shift, "the release should clear it");
         });
     }
 
@@ -637,10 +644,10 @@ mod tests {
     fn a_tracked_ctrl_is_what_lets_the_form_tell_paste_from_a_typed_v() {
         on_hook_thread(|| {
             note_modifier(KeyCode(VK_RCONTROL.0), true);
-            assert!(current_modifiers().ctrl);
+            assert!(tracked_modifiers().ctrl);
 
             note_modifier(KeyCode(VK_RCONTROL.0), false);
-            assert!(!current_modifiers().ctrl);
+            assert!(!tracked_modifiers().ctrl);
         });
     }
 
@@ -651,7 +658,17 @@ mod tests {
             note_modifier(KeyCode(u16::from(b'W')), true);
             note_modifier(KeyCode(u16::from(b'W')), false);
 
-            assert!(current_modifiers().shift, "W must not clear shift");
+            assert!(tracked_modifiers().shift, "W must not clear shift");
+        });
+    }
+
+    /// Whatever the real keyboard is doing, a tracked press must still come through.
+    #[test]
+    fn the_reported_modifiers_never_drop_a_tracked_one() {
+        on_hook_thread(|| {
+            note_modifier(KeyCode(VK_LSHIFT.0), true);
+
+            assert!(current_modifiers().shift);
         });
     }
 }

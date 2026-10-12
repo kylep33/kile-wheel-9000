@@ -12,7 +12,7 @@ pub use petal::{PETAL_MAX_REACH_RATIO, Petal};
 pub use rows::{Line, RowValue};
 
 use kile_wheel_core::binding::{KeyCode, Modifiers, keys};
-use kile_wheel_core::item::{Item, ItemKind};
+use kile_wheel_core::item::{AppCandidate, Item, ItemKind};
 use kile_wheel_core::slot::{Slot, Tab};
 
 use rows::{Action, Row, RowStep};
@@ -43,6 +43,9 @@ pub enum Outcome {
 enum Stage {
     /// Choosing what the slot should be.
     PickType { highlighted: usize },
+    /// Choosing which app, from the taskbar pins and whatever is running. Only reached
+    /// for a pinned app, and only when there is at least one to offer.
+    PickApp { highlighted: usize },
     /// Filling the chosen type in. The kind is held here rather than in a hidden line, so
     /// every line in `rows` is one you can actually reach.
     Fill {
@@ -51,6 +54,8 @@ enum Stage {
         focused: usize,
     },
 }
+/// Last line of the app picker, for anything the list does not cover.
+const OTHER_APP: &str = "Other (type a path)";
 
 /// One slot's editor, rooted at the slice it belongs to.
 #[derive(Debug)]
@@ -60,17 +65,21 @@ pub struct Form {
     stage: Stage,
     /// Whether the slot already held something, which decides if Delete does anything.
     occupied: bool,
+    /// Apps the picker can offer. Gathered by the caller, which is the only part that
+    /// can reach the shell.
+    candidates: Vec<AppCandidate>,
     opened: Animation,
 }
 
 impl Form {
     /// Opens on the type picker, for a slot with nothing in it.
-    pub fn picking(tab: Tab, slot: Slot) -> Self {
+    pub fn picking(tab: Tab, slot: Slot, candidates: Vec<AppCandidate>) -> Self {
         Self {
             tab,
             slot,
             stage: Stage::PickType { highlighted: 0 },
             occupied: false,
+            candidates,
             opened: Animation::started(),
         }
     }
@@ -86,6 +95,7 @@ impl Form {
                 focused: 0,
             },
             occupied: true,
+            candidates: Vec::new(),
             opened: Animation::started(),
         }
     }
@@ -115,6 +125,7 @@ impl Form {
     pub fn title(&self) -> &'static str {
         match &self.stage {
             Stage::PickType { .. } => "What goes here?",
+            Stage::PickApp { .. } => "Which app?",
             Stage::Fill { kind, .. } => kind.type_name(),
         }
     }
@@ -122,22 +133,25 @@ impl Form {
     /// The lines to draw, with the focused one marked.
     pub fn lines(&self) -> Vec<Line> {
         match &self.stage {
-            Stage::PickType { highlighted } => ItemKind::NAMES
-                .iter()
-                .enumerate()
-                .map(|(index, name)| Line {
-                    label: name,
-                    value: None,
-                    focused: index == *highlighted,
-                    action: true,
-                })
-                .collect(),
+            Stage::PickType { highlighted } => choices(
+                ItemKind::NAMES.iter().map(|name| (*name).to_owned()),
+                *highlighted,
+            ),
+            Stage::PickApp { highlighted } => choices(self.app_labels(), *highlighted),
             Stage::Fill { rows, focused, .. } => rows
                 .iter()
                 .enumerate()
                 .map(|(index, row)| row.line(index == *focused))
                 .collect(),
         }
+    }
+
+    /// The app picker's lines: every candidate, then a way out for anything not listed.
+    fn app_labels(&self) -> impl Iterator<Item = String> + '_ {
+        self.candidates
+            .iter()
+            .map(|candidate| candidate.name.clone())
+            .chain(std::iter::once(OTHER_APP.to_owned()))
     }
 
     /// Acts on a click that landed on line `index`.
@@ -151,6 +165,13 @@ impl Form {
                 true => {
                     *highlighted = index;
                     self.chose_type(index)
+                }
+                false => Outcome::Ignored,
+            },
+            Stage::PickApp { highlighted } => match index <= self.candidates.len() {
+                true => {
+                    *highlighted = index;
+                    self.chose_app(index)
                 }
                 false => Outcome::Ignored,
             },
@@ -185,7 +206,13 @@ impl Form {
         clipboard: Option<&str>,
     ) -> Outcome {
         let step = match &mut self.stage {
-            Stage::PickType { highlighted } => press_picker(highlighted, code),
+            Stage::PickType { highlighted } => {
+                press_picker(highlighted, code, ItemKind::NAMES.len())
+            }
+            // the escape hatch makes the list one longer than the candidates
+            Stage::PickApp { highlighted } => {
+                press_picker(highlighted, code, self.candidates.len() + 1)
+            }
             Stage::Fill { rows, focused, .. } => {
                 press_fill(rows, focused, code, modifiers, typed, clipboard)
             }
@@ -197,12 +224,35 @@ impl Form {
             Step::Cancel => Outcome::Cancel,
             Step::Delete => Outcome::Delete,
             Step::Copy(text) => Outcome::Copy(text),
-            Step::ChoseType(index) => self.chose_type(index),
+            Step::Chose(index) => self.chose(index),
+            Step::Back => self.back_to_types(),
             Step::Save => self.save(),
         }
     }
 
-    /// An unpinned app slot needs nothing filling in, so picking it is the whole job.
+    /// Routes a confirmed pick to whichever picker is showing.
+    fn chose(&mut self, index: usize) -> Outcome {
+        match self.stage {
+            Stage::PickType { .. } => self.chose_type(index),
+            Stage::PickApp { .. } => self.chose_app(index),
+            Stage::Fill { .. } => Outcome::Ignored,
+        }
+    }
+
+    /// Backspace out of the app picker returns to the type list, so a wrong turn is not a
+    /// dead end that has to be escaped and reopened.
+    fn back_to_types(&mut self) -> Outcome {
+        if !matches!(self.stage, Stage::PickApp { .. }) {
+            return Outcome::Ignored;
+        }
+
+        self.stage = Stage::PickType { highlighted: 0 };
+        self.opened.restart();
+        Outcome::Redraw
+    }
+
+    /// An unpinned app slot needs nothing filling in, so picking it is the whole job. A
+    /// pinned app detours through the app picker, so its path does not have to be typed.
     fn chose_type(&mut self, index: usize) -> Outcome {
         let Some(kind) = ItemKind::blank(index) else {
             return Outcome::Ignored;
@@ -212,7 +262,33 @@ impl Form {
             return Outcome::Commit(Box::new(self.item(UNPINNED_NAME.to_owned(), kind, None)));
         }
 
-        let seed = self.item(ItemKind::NAMES[index].to_owned(), kind.clone(), None);
+        // with nothing to offer, the list would hold only its own escape hatch
+        if kind.is_app() && !self.candidates.is_empty() {
+            self.stage = Stage::PickApp { highlighted: 0 };
+            self.opened.restart();
+            return Outcome::Redraw;
+        }
+
+        self.fill_with(kind, ItemKind::NAMES[index].to_owned())
+    }
+
+    /// Acts on a choice from the app picker. Past the candidates is "Other", which is the
+    /// blank app form and the typed-path route.
+    fn chose_app(&mut self, index: usize) -> Outcome {
+        let Some(candidate) = self.candidates.get(index).cloned() else {
+            return self.fill_with(ItemKind::blank_app(), String::new());
+        };
+
+        let kind = ItemKind::App {
+            target: candidate.target,
+        };
+        self.fill_with(kind, candidate.name)
+    }
+
+    /// Moves to the fields, seeded with whatever is already known.
+    fn fill_with(&mut self, kind: ItemKind, name: String) -> Outcome {
+        let seed = self.item(name, kind.clone(), None);
+
         self.stage = Stage::Fill {
             kind,
             rows: rows::build(&seed),
@@ -250,15 +326,33 @@ impl Form {
 enum Step {
     Ignored,
     Redraw,
-    ChoseType(usize),
+    Chose(usize),
+    /// Out of the app picker and back to the type list.
+    Back,
     Copy(String),
     Save,
     Delete,
     Cancel,
 }
 
-fn press_picker(highlighted: &mut usize, code: KeyCode) -> Step {
-    let last = ItemKind::NAMES.len() - 1;
+/// Builds the lines for a picker stage, so the type list and the app list behave alike.
+fn choices(labels: impl Iterator<Item = String>, highlighted: usize) -> Vec<Line> {
+    labels
+        .enumerate()
+        .map(|(index, label)| Line {
+            label,
+            value: None,
+            focused: index == highlighted,
+            action: true,
+        })
+        .collect()
+}
+
+/// Moves through a list of `length` choices and reports a confirmed pick.
+fn press_picker(highlighted: &mut usize, code: KeyCode, length: usize) -> Step {
+    let Some(last) = length.checked_sub(1) else {
+        return Step::Ignored;
+    };
 
     if code == keys::ARROW_UP || code == keys::W {
         *highlighted = highlighted.saturating_sub(1);
@@ -268,8 +362,11 @@ fn press_picker(highlighted: &mut usize, code: KeyCode) -> Step {
         *highlighted = (*highlighted + 1).min(last);
         return Step::Redraw;
     }
+    if code == keys::BACKSPACE {
+        return Step::Back;
+    }
     if code == keys::ENTER {
-        return Step::ChoseType(*highlighted);
+        return Step::Chose(*highlighted);
     }
     Step::Ignored
 }
@@ -332,7 +429,25 @@ mod tests {
     }
 
     fn picker() -> Form {
-        Form::picking(Tab::FIRST, slot())
+        Form::picking(Tab::FIRST, slot(), Vec::new())
+    }
+
+    /// A picker that has apps to offer, so the app stage is reachable.
+    fn picker_with_apps() -> Form {
+        Form::picking(Tab::FIRST, slot(), candidates())
+    }
+
+    fn candidates() -> Vec<AppCandidate> {
+        vec![
+            AppCandidate {
+                name: "Google Chrome".to_owned(),
+                target: r"C:\pins\Google Chrome.lnk".to_owned(),
+            },
+            AppCandidate {
+                name: "Kiro".to_owned(),
+                target: r"C:\pins\Kiro.lnk".to_owned(),
+            },
+        ]
     }
 
     fn press(form: &mut Form, code: KeyCode) -> Outcome {
@@ -376,7 +491,11 @@ mod tests {
 
     #[test]
     fn the_picker_lists_every_type() {
-        let labels: Vec<&str> = picker().lines().iter().map(|line| line.label).collect();
+        let labels: Vec<String> = picker()
+            .lines()
+            .iter()
+            .map(|line| line.label.clone())
+            .collect();
 
         assert_eq!(labels, ItemKind::NAMES);
     }
@@ -670,5 +789,136 @@ mod tests {
         );
 
         assert_eq!(outcome, Outcome::Copy(showing));
+    }
+
+    fn labels_of(form: &Form) -> Vec<String> {
+        form.lines().iter().map(|line| line.label.clone()).collect()
+    }
+
+    /// Clicks the line with this label, so a test does not hard-code row positions.
+    fn click_on(form: &mut Form, label: &str) -> Outcome {
+        let at = form
+            .lines()
+            .iter()
+            .position(|line| line.label == label)
+            .unwrap_or_else(|| panic!("no \"{label}\" line in {:?}", labels_of(form)));
+
+        form.click(at)
+    }
+
+    #[test]
+    fn picking_a_pinned_app_offers_the_candidates_before_asking_for_a_path() {
+        let mut form = picker_with_apps();
+
+        form.click(PINNED_APP);
+
+        assert_eq!(form.title(), "Which app?");
+        assert_eq!(
+            labels_of(&form),
+            ["Google Chrome", "Kiro", OTHER_APP],
+            "the escape hatch should come last"
+        );
+    }
+
+    #[test]
+    fn choosing_a_candidate_fills_in_its_name_and_target() {
+        let mut form = picker_with_apps();
+        form.click(PINNED_APP);
+
+        form.click(0);
+
+        let Outcome::Commit(item) = click_on(&mut form, "Save") else {
+            panic!("Save should commit, lines were {:?}", labels_of(&form));
+        };
+        assert_eq!(item.name, "Google Chrome");
+        assert_eq!(
+            item.kind,
+            ItemKind::App {
+                target: r"C:\pins\Google Chrome.lnk".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn choosing_other_leaves_the_target_blank_to_be_typed() {
+        let mut form = picker_with_apps();
+        form.click(PINNED_APP);
+
+        let other = labels_of(&form).len() - 1;
+        form.click(other);
+
+        assert_eq!(form.title(), ItemKind::blank_app().type_name());
+        assert!(
+            labels_of(&form).iter().any(|label| label == "Target"),
+            "the typed-path field should be showing, got {:?}",
+            labels_of(&form)
+        );
+    }
+
+    /// With no pins and nothing running there is nothing to choose from, so the list would
+    /// hold only its own escape hatch.
+    #[test]
+    fn with_no_candidates_a_pinned_app_goes_straight_to_the_fields() {
+        let mut form = picker();
+
+        form.click(PINNED_APP);
+
+        assert_eq!(form.title(), ItemKind::blank_app().type_name());
+    }
+
+    #[test]
+    fn the_app_picker_moves_with_the_arrows_and_stops_at_the_ends() {
+        let mut form = picker_with_apps();
+        form.click(PINNED_APP);
+
+        press(&mut form, keys::ARROW_UP);
+        assert!(form.lines()[0].focused, "up at the top should stay put");
+
+        for _ in 0..9 {
+            press(&mut form, keys::ARROW_DOWN);
+        }
+        let last = form.lines().len() - 1;
+        assert!(
+            form.lines()[last].focused,
+            "down past the end should stop at the last line"
+        );
+    }
+
+    #[test]
+    fn enter_on_the_app_picker_chooses_the_highlighted_app() {
+        let mut form = picker_with_apps();
+        form.click(PINNED_APP);
+        press(&mut form, keys::ARROW_DOWN);
+
+        press(&mut form, keys::ENTER);
+
+        assert!(
+            labels_of(&form).iter().any(|label| label == "Name"),
+            "it should have moved on to the fields"
+        );
+        let Outcome::Commit(item) = click_on(&mut form, "Save") else {
+            panic!("Save should commit");
+        };
+        assert_eq!(item.name, "Kiro");
+    }
+
+    #[test]
+    fn backspace_out_of_the_app_picker_returns_to_the_type_list() {
+        let mut form = picker_with_apps();
+        form.click(PINNED_APP);
+
+        press(&mut form, keys::BACKSPACE);
+
+        assert_eq!(form.title(), "What goes here?");
+        assert_eq!(labels_of(&form), ItemKind::NAMES);
+    }
+
+    #[test]
+    fn clicking_past_the_last_app_does_nothing() {
+        let mut form = picker_with_apps();
+        form.click(PINNED_APP);
+        let past_end = form.lines().len();
+
+        assert_eq!(form.click(past_end), Outcome::Ignored);
     }
 }

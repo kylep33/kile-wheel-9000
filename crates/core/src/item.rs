@@ -156,6 +156,18 @@ impl ItemKind {
         matches!(self, Self::UnpinnedApp)
     }
 
+    /// Whether this is a pinned app, which is the one type the app picker can offer.
+    pub fn is_app(&self) -> bool {
+        matches!(self, Self::App { .. })
+    }
+
+    /// A pinned app with nothing chosen yet, for the typed-path route.
+    pub fn blank_app() -> Self {
+        Self::App {
+            target: String::new(),
+        }
+    }
+
     /// The path an automatic icon is extracted from, when there is one.
     pub fn icon_source(&self) -> Option<&str> {
         match self {
@@ -165,6 +177,15 @@ impl ItemKind {
             Self::UnpinnedApp | Self::Snippet { .. } | Self::Terminal { .. } => None,
         }
     }
+}
+
+/// An app the picker can offer, so a pinned app can be chosen from a list instead of
+/// having its path typed out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppCandidate {
+    pub name: String,
+    /// Whatever the shell launches it by: a shortcut, an executable, or a shell item.
+    pub target: String,
 }
 
 /// One pinned entry from the config.

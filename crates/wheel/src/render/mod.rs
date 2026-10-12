@@ -409,12 +409,17 @@ impl Renderer {
 
         // an action is a button, so it spans the row rather than sitting in a label column
         if line.action {
-            self.draw_text(line.label, row, self.fonts.number(), colour);
+            self.draw_text(&line.label, row, self.fonts.number(), colour);
             return;
         }
 
         let (label, value) = form::split_row(row, FORM_LABEL_RATIO);
-        self.draw_text(line.label, label, self.fonts.number(), &self.palette.number);
+        self.draw_text(
+            &line.label,
+            label,
+            self.fonts.number(),
+            &self.palette.number,
+        );
         self.draw_value(value, line, colour);
     }
 

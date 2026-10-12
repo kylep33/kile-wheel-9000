@@ -41,7 +41,9 @@ pub enum RowValue {
 /// One drawn line of a form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
-    pub label: &'static str,
+    /// Owned because an app picker line is named after a shortcut on disk, not after a
+    /// constant in this file.
+    pub label: String,
     pub value: Option<RowValue>,
     pub focused: bool,
     /// Drawn as a button rather than a field.
@@ -138,7 +140,7 @@ impl Row {
         };
 
         Line {
-            label,
+            label: label.to_owned(),
             value,
             focused,
             action,
@@ -439,8 +441,8 @@ mod tests {
     fn an_unpinned_slot_is_not_offered_an_icon() {
         let rows = build(&item(ItemKind::UnpinnedApp));
 
-        let labels: Vec<&str> = rows.iter().map(|row| row.line(false).label).collect();
-        assert!(!labels.contains(&ICON), "{labels:?}");
+        let labels: Vec<String> = rows.iter().map(|row| row.line(false).label).collect();
+        assert!(!labels.iter().any(|label| label == ICON), "{labels:?}");
     }
 
     #[test]
@@ -678,7 +680,7 @@ mod tests {
     fn every_form_ends_with_save_delete_and_cancel() {
         let rows = build(&item(ItemKind::UnpinnedApp));
 
-        let tail: Vec<&str> = rows
+        let tail: Vec<String> = rows
             .iter()
             .filter(|row| matches!(row, Row::Action(_)))
             .map(|row| row.line(false).label)
