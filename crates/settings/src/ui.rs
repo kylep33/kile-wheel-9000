@@ -25,6 +25,7 @@ pub struct Settings {
     /// The Items page's tab and selected slot, kept across visits so leaving and coming
     /// back lands where you were.
     pub items_view: pages::ItemsView,
+    pub icon_picker: pages::IconPicker,
     /// Which view the scroll offset belongs to.
     scrolled_view: View,
 }
@@ -43,6 +44,7 @@ impl Settings {
             wsl_distros: sources::wsl_distros(),
             editor: None,
             items_view: pages::ItemsView::default(),
+            icon_picker: pages::IconPicker::default(),
             scrolled_view: (Page::General, false),
         })
     }

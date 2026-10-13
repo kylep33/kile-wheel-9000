@@ -11,9 +11,12 @@ use super::mini_wheel::{self, DragState, Palette, SliceView, WheelSpec};
 use crate::draft::slot_label;
 use crate::ui::Settings;
 
-/// Below this the wheel and its details stack instead of sitting side by side.
-const SIDE_BY_SIDE_MIN_PX: f32 = 640.0;
+/// Below this the wheel and its details stack instead of sitting side by side. Room for
+/// the smallest wheel, a gap and the details column.
+const SIDE_BY_SIDE_MIN_PX: f32 = 540.0;
 const DETAILS_MIN_PX: f32 = 260.0;
+/// Kept free under the wheel, so it never sits flush against the save bar.
+const WHEEL_BOTTOM_ROOM_PX: f32 = 12.0;
 
 /// Which tab the page is showing and which slice is picked.
 #[derive(Debug, Clone, Copy)]
@@ -76,7 +79,7 @@ fn draw_list(settings: &mut Settings, ui: &mut egui::Ui) {
     match side_by_side {
         true => {
             ui.horizontal_top(|ui| {
-                draw_wheel(settings, ui, &mut requests);
+                draw_wheel(settings, ui, &mut requests, DETAILS_MIN_PX + 16.0);
                 ui.add_space(16.0);
                 ui.vertical(|ui| {
                     ui.set_min_width(DETAILS_MIN_PX);
@@ -85,7 +88,7 @@ fn draw_list(settings: &mut Settings, ui: &mut egui::Ui) {
             });
         }
         false => {
-            ui.vertical_centered(|ui| draw_wheel(settings, ui, &mut requests));
+            ui.vertical_centered(|ui| draw_wheel(settings, ui, &mut requests, 0.0));
             ui.add_space(12.0);
             draw_details(settings, ui, &mut requests);
         }
@@ -164,7 +167,8 @@ fn tab_chip_label(settings: &Settings, tab: Tab, used: usize) -> egui::RichText 
     }
 }
 
-fn draw_wheel(settings: &mut Settings, ui: &mut egui::Ui, requests: &mut Requests) {
+/// `beside_px` is what the details column needs next to the wheel, so the wheel leaves it.
+fn draw_wheel(settings: &mut Settings, ui: &mut egui::Ui, requests: &mut Requests, beside_px: f32) {
     let tab = settings.items_view.tab;
     let items = &settings.draft.working.items;
 
@@ -188,7 +192,13 @@ fn draw_wheel(settings: &mut Settings, ui: &mut egui::Ui, requests: &mut Request
     );
     let hub_title = format!("TAB {}", tab.number());
     let hub_caption = tab_name(settings, tab).unwrap_or_default();
-    let diameter = mini_wheel::diameter_for(ui.available_rect_before_wrap());
+    // the page scrolls, so its own height is unbounded; size against what is on screen
+    let visible_height = ui.clip_rect().bottom() - ui.cursor().top() - WHEEL_BOTTOM_ROOM_PX;
+    let side = (ui.available_width() - beside_px).min(visible_height);
+    let diameter = mini_wheel::diameter_for(egui::Rect::from_min_size(
+        ui.cursor().min,
+        egui::Vec2::splat(side),
+    ));
 
     let spec = WheelSpec {
         diameter_px: diameter,
@@ -398,7 +408,7 @@ fn draw_editor(settings: &mut Settings, ui: &mut egui::Ui) {
     };
     super::heading(ui, title, editor.item.kind.type_name());
 
-    draw_common(ui, &mut editor.item, &settings.draft.icons_dir());
+    draw_common(ui, &mut editor.item, settings);
     ui.add_space(8.0);
     ui.separator();
     ui.add_space(8.0);
@@ -444,7 +454,7 @@ fn commit(settings: &mut Settings, editor: &ItemEditor) {
 }
 
 /// Fields every type has: the name, the icon, and where it sits.
-fn draw_common(ui: &mut egui::Ui, item: &mut Item, icons_dir: &std::path::Path) {
+fn draw_common(ui: &mut egui::Ui, item: &mut Item, settings: &mut Settings) {
     super::row(ui, "Name", |ui| {
         ui.add(egui::TextEdit::singleline(&mut item.name).desired_width(f32::INFINITY));
     });
@@ -461,18 +471,16 @@ fn draw_common(ui: &mut egui::Ui, item: &mut Item, icons_dir: &std::path::Path) 
         }
     });
 
-    let mut icon = item.icon.clone().unwrap_or_default();
-    super::path_row(ui, "Icon", &mut icon, || {
-        rfd::FileDialog::new()
-            .set_directory(icons_dir)
-            .add_filter(
-                "Images",
-                &["png", "jpg", "jpeg", "bmp", "ico", "gif", "webp"],
-            )
-            .pick_file()
-    });
-    item.icon = Some(icon).filter(|text| !text.trim().is_empty());
-    ui.label("  Leave blank to use the icon Windows already has for the target.");
+    let icons_dir = settings.draft.icons_dir();
+    let root = settings.draft.config_root().to_path_buf();
+    super::icon_field(
+        ui,
+        &mut settings.icon_picker,
+        &icons_dir,
+        &root,
+        "item",
+        &mut item.icon,
+    );
 }
 
 fn draw_kind(ui: &mut egui::Ui, settings: &Settings, kind: &mut ItemKind) {

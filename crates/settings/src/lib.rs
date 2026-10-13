@@ -10,6 +10,7 @@ mod ui;
 use anyhow::{Context, Result};
 use kile_wheel_core::names::{ConfigPaths, DISPLAY_NAME};
 use kile_wheel_platform::known_folders;
+use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 
 use crate::ui::Settings;
 
@@ -22,6 +23,13 @@ pub fn run() -> Result<()> {
     let app_data = known_folders::roaming_app_data()
         .context("could not find %APPDATA%; the shell refused the folder lookup")?;
     let paths = ConfigPaths::new(&app_data);
+
+    // SAFETY: the icon picker renders through the shell, which needs COM on this thread.
+    // Single-threaded, because the window and its drag and drop live here too; a later
+    // OLE init by the windowing layer then finds the apartment already set up.
+    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+        .ok()
+        .context("could not initialise COM, so icons could not be drawn")?;
 
     let settings = Settings::load(paths)?;
     let viewport = egui::ViewportBuilder::default()

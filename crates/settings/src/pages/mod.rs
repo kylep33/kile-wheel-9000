@@ -3,11 +3,13 @@
 mod about;
 mod general;
 mod hotkeys;
+mod icon_picker;
 mod items;
 mod mini_wheel;
 mod tabs;
 mod wheel;
 
+pub use icon_picker::IconPicker;
 pub use items::{ItemEditor, ItemsView};
 
 use crate::ui::Settings;
@@ -154,4 +156,66 @@ pub fn optional_choice(
     });
 
     *value = Some(text).filter(|text| !text.trim().is_empty());
+}
+
+/// An icon field: a preview, a picker over the icons folder, Browse for anything outside
+/// it, and the path itself for typing.
+///
+/// `owner` names the field, so with several on one page the picker fills the one that
+/// opened it. Blank means the target's own icon.
+pub fn icon_field(
+    ui: &mut egui::Ui,
+    picker: &mut IconPicker,
+    icons_dir: &std::path::Path,
+    config_root: &std::path::Path,
+    owner: &str,
+    icon: &mut Option<String>,
+) {
+    let mut text = icon.clone().unwrap_or_default();
+    let preview = picker.preview(ui.ctx(), &text, config_root);
+
+    row(ui, "Icon", |ui| {
+        match &preview {
+            Some(texture) => {
+                ui.add(
+                    egui::Image::from_texture(texture).fit_to_exact_size(egui::Vec2::splat(24.0)),
+                );
+            }
+            None => {
+                ui.weak("default");
+            }
+        }
+        if ui.button("Choose…").clicked() {
+            picker.open(icons_dir, owner);
+        }
+        if ui.button("Browse").clicked()
+            && let Some(path) = rfd::FileDialog::new()
+                .set_directory(icons_dir)
+                .add_filter(
+                    "Images",
+                    &["png", "jpg", "jpeg", "bmp", "ico", "gif", "webp"],
+                )
+                .pick_file()
+        {
+            text = icon_picker::relative_to(&path, config_root);
+        }
+        if !text.is_empty() && ui.button("Clear").clicked() {
+            text.clear();
+        }
+    });
+    row(ui, "", |ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut text)
+                .hint_text("blank uses the target's own icon")
+                .desired_width(f32::INFINITY),
+        );
+    });
+
+    match picker.show(ui.ctx(), config_root, owner) {
+        icon_picker::Choice::Picked(path) => text = path,
+        icon_picker::Choice::Cleared => text.clear(),
+        icon_picker::Choice::Cancelled | icon_picker::Choice::Nothing => {}
+    }
+
+    *icon = Some(text).filter(|text| !text.trim().is_empty());
 }

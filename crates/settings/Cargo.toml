@@ -21,3 +21,4 @@ egui.workspace = true
 kile-wheel-core.workspace = true
 kile-wheel-platform.workspace = true
 rfd.workspace = true
+windows.workspace = true

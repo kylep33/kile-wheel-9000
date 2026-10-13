@@ -12,6 +12,8 @@ pub fn draw(settings: &mut Settings, ui: &mut egui::Ui) {
     );
 
     let icons_dir = settings.draft.icons_dir();
+    let root = settings.draft.config_root().to_path_buf();
+    let picker = &mut settings.icon_picker;
     let mut remove = None;
 
     for (index, tab) in settings.draft.working.tabs.iter_mut().enumerate() {
@@ -24,7 +26,8 @@ pub fn draw(settings: &mut Settings, ui: &mut egui::Ui) {
             });
 
             super::optional_text(ui, "Name", &mut tab.name);
-            draw_icon(ui, &icons_dir, &mut tab.icon);
+            let owner = format!("tab {}", tab.index);
+            super::icon_field(ui, picker, &icons_dir, &root, &owner, &mut tab.icon);
         });
         ui.add_space(8.0);
     }
@@ -54,22 +57,4 @@ fn draw_add(settings: &mut Settings, ui: &mut egui::Ui) {
     if ui.button(format!("Add tab {next}")).clicked() {
         settings.draft.ensure_tab(next);
     }
-}
-
-/// Icon paths are stored relative to the config folder, so the whole folder stays
-/// portable between machines.
-fn draw_icon(ui: &mut egui::Ui, icons_dir: &std::path::Path, icon: &mut Option<String>) {
-    let mut text = icon.clone().unwrap_or_default();
-
-    super::path_row(ui, "Icon", &mut text, || {
-        rfd::FileDialog::new()
-            .set_directory(icons_dir)
-            .add_filter(
-                "Images",
-                &["png", "jpg", "jpeg", "bmp", "ico", "gif", "webp"],
-            )
-            .pick_file()
-    });
-
-    *icon = Some(text).filter(|text| !text.trim().is_empty());
 }

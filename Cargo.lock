@@ -1734,6 +1734,7 @@ dependencies = [
  "kile-wheel-core",
  "kile-wheel-platform",
  "rfd",
+ "windows",
 ]
 
 [[package]]

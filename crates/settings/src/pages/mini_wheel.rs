@@ -20,6 +20,11 @@ const ARC_STEPS: usize = 14;
 
 const SLICE_RAD: f32 = std::f32::consts::TAU / Slot::COUNT as f32;
 
+/// Small enough to fit the settings window at its minimum height, big enough that the
+/// labels still read.
+const MIN_DIAMETER_PX: f32 = 200.0;
+const MAX_DIAMETER_PX: f32 = 380.0;
+
 /// How long a slice label may run before it is cut short. The slice is small, so the
 /// full name lives in the panel beside it.
 const LABEL_CHARS: usize = 11;
@@ -367,7 +372,7 @@ pub fn diameter_for(available: Rect) -> f32 {
     available
         .width()
         .min(available.height())
-        .clamp(240.0, 380.0)
+        .clamp(MIN_DIAMETER_PX, MAX_DIAMETER_PX)
 }
 
 #[cfg(test)]
@@ -444,7 +449,7 @@ mod tests {
         let tiny = Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 100.0));
         let huge = Rect::from_min_size(Pos2::ZERO, Vec2::new(2000.0, 2000.0));
 
-        assert_eq!(diameter_for(tiny), 240.0);
-        assert_eq!(diameter_for(huge), 380.0);
+        assert_eq!(diameter_for(tiny), MIN_DIAMETER_PX);
+        assert_eq!(diameter_for(huge), MAX_DIAMETER_PX);
     }
 }
