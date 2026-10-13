@@ -15,7 +15,7 @@ pub fn draw(settings: &mut Settings, ui: &mut egui::Ui) {
     let config_file = settings.draft.config_file();
 
     super::row(ui, "Config folder", |ui| {
-        ui.label(root.to_string_lossy());
+        super::path_label(ui, &root);
     });
     super::row(ui, "", |ui| {
         if ui.button("Open config folder").clicked() {

@@ -9,7 +9,10 @@ use kile_wheel_core::config::Config;
 use kile_wheel_core::item::{Item, ItemKind, Position};
 use kile_wheel_core::layout::SlotMemory;
 use kile_wheel_core::slot::{Slot, Tab};
+#[cfg(test)]
+use kile_wheel_platform::apps::WindowRef;
 use kile_wheel_platform::apps::{AppGroup, AppKey, WindowModel};
+use kile_wheel_platform::identity::{AppIdentity, IdentityCache};
 use kile_wheel_platform::paths::expand;
 use windows::Win32::Foundation::HWND;
 
@@ -47,6 +50,46 @@ impl SlotEntry {
     pub fn is_waiting(&self) -> bool {
         matches!(self.target, SlotTarget::Waiting)
     }
+
+    /// What starts another window of this slot's app. `None` for anything that is not an
+    /// app, since a script or a url has no windows to add to.
+    pub fn new_window(&self) -> Option<NewWindow> {
+        let launch = match &self.target {
+            SlotTarget::Pinned(item) if matches!(item.kind, ItemKind::App { .. }) => {
+                item.kind.clone()
+            }
+            SlotTarget::Running(key) => ItemKind::App {
+                target: launch_target(key),
+            },
+            SlotTarget::Pinned(_) | SlotTarget::Waiting => return None,
+        };
+
+        Some(NewWindow {
+            label: format!("New {} window", self.label),
+            icon_source: self.icon_source.clone(),
+            launch,
+        })
+    }
+}
+
+/// The sub-wheel entry that opens one more window of the app, as the taskbar's jump list
+/// does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewWindow {
+    pub label: String,
+    pub icon_source: Option<String>,
+    pub launch: ItemKind,
+}
+
+/// What the shell launches a running app by.
+///
+/// Packaged apps go through the Apps folder, because their executable path is not what
+/// starts them.
+pub fn launch_target(key: &AppKey) -> String {
+    match key {
+        AppKey::Executable(path) => path.to_string_lossy().into_owned(),
+        AppKey::UserModelId(id) => format!(r"shell:AppsFolder\{id}"),
+    }
 }
 
 /// Every tab's slots, resolved for one open.
@@ -57,15 +100,31 @@ pub struct Layout {
 }
 
 impl Layout {
-    pub fn build(config: &Config, model: &WindowModel, memory: &mut SlotMemory<AppKey>) -> Self {
-        let pinned = config.pinned();
+    pub fn build(
+        config: &Config,
+        model: &WindowModel,
+        memory: &mut SlotMemory<AppKey>,
+        identities: &mut IdentityCache,
+    ) -> Self {
+        let pinned: Vec<(Position, &Item, Option<AppIdentity>)> = config
+            .pinned()
+            .into_iter()
+            .map(|(position, item)| (position, item, identity_of(item, identities)))
+            .collect();
         let groups = model.groups();
         let focused = model.focused_key();
 
+        // a running app that is already pinned shows in its pinned slot, so it must not
+        // also claim an unpinned one
         let open_slots = unpinned_slots(config);
         let spare: Vec<AppKey> = groups
             .iter()
-            .filter(|group| !pinned.values().any(|item| matches_app(item, group.key)))
+            .filter(|group| {
+                !pinned
+                    .iter()
+                    .filter_map(|(_, _, identity)| identity.as_ref())
+                    .any(|identity| claims(identity, group))
+            })
             .map(|group| group.key.clone())
             .collect();
 
@@ -75,10 +134,11 @@ impl Layout {
         // untouched tab lands on a blank wheel instead of doing nothing
         let mut tabs = vec![vec![None; Slot::COUNT]; Tab::MAX_COUNT];
 
-        for (position, item) in pinned {
+        for (position, item, identity) in &pinned {
+            let position = *position;
             let entry = match item.kind.is_unpinned() {
                 true => unpinned_entry(position, memory, &groups, focused),
-                false => pinned_entry(item, &groups, focused),
+                false => pinned_entry(item, identity.as_ref(), &groups, focused),
             };
             tabs[position.tab.index()][position.slot.index()] = Some(entry);
         }
@@ -146,19 +206,46 @@ fn unpinned_entry(
 
 /// A pinned app shows the windows it already has open, so it behaves like the taskbar
 /// rather than appearing twice.
-fn pinned_entry(item: &Item, groups: &[AppGroup<'_>], focused: Option<&AppKey>) -> SlotEntry {
-    let group = groups.iter().find(|group| matches_app(item, group.key));
+///
+/// Every matching group contributes, because one pin can stand for several: Chrome keys
+/// each profile's windows by its own id, while its pin names chrome.exe.
+fn pinned_entry(
+    item: &Item,
+    identity: Option<&AppIdentity>,
+    groups: &[AppGroup<'_>],
+    focused: Option<&AppKey>,
+) -> SlotEntry {
+    let owned: Vec<&AppGroup<'_>> = match identity {
+        Some(identity) => groups
+            .iter()
+            .filter(|group| claims(identity, group))
+            .collect(),
+        None => Vec::new(),
+    };
 
     SlotEntry {
         label: item.name.clone(),
         icon_source: icon_source(item),
         kind: item.kind.clone(),
         target: SlotTarget::Pinned(item.clone()),
-        windows: group
-            .map(|group| group.windows.iter().map(|window| window.handle).collect())
-            .unwrap_or_default(),
-        focused: group.is_some_and(|group| focused == Some(group.key)),
+        windows: owned
+            .iter()
+            .flat_map(|group| group.windows.iter().map(|window| window.handle))
+            .collect(),
+        focused: owned.iter().any(|group| focused == Some(group.key)),
     }
+}
+
+/// Only an app item stands for running windows; a script or a url never does.
+fn identity_of(item: &Item, identities: &mut IdentityCache) -> Option<AppIdentity> {
+    let ItemKind::App { target } = &item.kind else {
+        return None;
+    };
+    Some(identities.identity(target).clone())
+}
+
+fn claims(identity: &AppIdentity, group: &AppGroup<'_>) -> bool {
+    identity.matches(group.key, group.executable)
 }
 
 /// The icon comes from a user-supplied image when one is configured, otherwise from the
@@ -172,10 +259,7 @@ fn icon_source(item: &Item) -> Option<String> {
 }
 
 fn icon_path(key: &AppKey) -> String {
-    match key {
-        AppKey::Executable(path) => path.display().to_string(),
-        AppKey::UserModelId(id) => format!("shell:AppsFolder\\{id}"),
-    }
+    launch_target(key)
 }
 
 /// Slot labels mirror the taskbar: the app, not the window title.
@@ -193,22 +277,6 @@ fn group_label(group: &AppGroup<'_>) -> String {
             Some((_, app)) => app.to_owned(),
             None => id.clone(),
         },
-    }
-}
-
-/// Whether a pinned app item is the same app as a running group.
-fn matches_app(item: &Item, key: &AppKey) -> bool {
-    let ItemKind::App { target } = &item.kind else {
-        return false;
-    };
-    let target = expand(target);
-
-    match key {
-        // Windows paths are case-insensitive, so comparing them as written would miss
-        AppKey::Executable(path) => path
-            .to_str()
-            .is_some_and(|path| path.eq_ignore_ascii_case(&target)),
-        AppKey::UserModelId(id) => target.eq_ignore_ascii_case(id) || target.ends_with(id),
     }
 }
 
@@ -275,24 +343,52 @@ mod tests {
         assert!(unpinned_slots(&Config::default()).is_empty());
     }
 
+    fn window(handle: isize) -> WindowRef<'static> {
+        WindowRef {
+            handle: HWND(handle as *mut _),
+            title: "",
+        }
+    }
+
+    fn running<'a>(
+        key: &'a AppKey,
+        executable: Option<&'a Path>,
+        handles: &[isize],
+    ) -> AppGroup<'a> {
+        AppGroup {
+            key,
+            executable,
+            windows: handles.iter().map(|handle| window(*handle)).collect(),
+        }
+    }
+
+    fn identity(item: &Item) -> Option<AppIdentity> {
+        let ItemKind::App { target } = &item.kind else {
+            return None;
+        };
+        Some(AppIdentity::unresolved(target))
+    }
+
     #[test]
-    fn a_pinned_app_matches_a_running_group_whatever_the_case() {
+    fn a_pinned_app_claims_its_running_group_whatever_the_case() {
         let item = app_item("Code", r"C:\Apps\Code.exe", 1, 0);
         let key = AppKey::Executable(r"c:\apps\code.exe".into());
 
-        assert!(matches_app(&item, &key));
+        let identity = identity(&item).expect("an app has an identity");
+        assert!(claims(&identity, &group(&key, None)));
     }
 
     #[test]
-    fn a_pinned_app_does_not_match_a_different_executable() {
+    fn a_pinned_app_does_not_claim_a_different_executable() {
         let item = app_item("Code", r"C:\Apps\Code.exe", 1, 0);
         let key = AppKey::Executable(r"C:\Apps\Other.exe".into());
 
-        assert!(!matches_app(&item, &key));
+        let identity = identity(&item).expect("an app has an identity");
+        assert!(!claims(&identity, &group(&key, None)));
     }
 
     #[test]
-    fn a_pinned_packaged_app_matches_by_user_model_id() {
+    fn a_pinned_packaged_app_claims_its_group_by_user_model_id() {
         let item = app_item(
             "Terminal",
             "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App",
@@ -301,14 +397,122 @@ mod tests {
         );
         let key = AppKey::UserModelId("Microsoft.WindowsTerminal_8wekyb3d8bbwe!App".to_owned());
 
-        assert!(matches_app(&item, &key));
+        let identity = identity(&item).expect("an app has an identity");
+        assert!(claims(&identity, &group(&key, None)));
     }
 
     #[test]
-    fn an_unpinned_slot_never_matches_a_running_group() {
-        let key = AppKey::Executable(r"C:\Apps\Code.exe".into());
+    fn an_unpinned_slot_stands_for_no_running_app() {
+        let mut identities = IdentityCache::default();
 
-        assert!(!matches_app(&unpinned(1, 0), &key));
+        assert_eq!(identity_of(&unpinned(1, 0), &mut identities), None);
+    }
+
+    /// The pinned slot is where an already-pinned app's windows go, so selecting it offers
+    /// them instead of starting yet another copy.
+    #[test]
+    fn a_pinned_app_collects_its_running_windows() {
+        let item = app_item("Code", r"C:\Apps\Code.exe", 1, 0);
+        let code = AppKey::Executable(r"C:\Apps\Code.exe".into());
+        let other = AppKey::Executable(r"C:\Apps\Other.exe".into());
+        let groups = [running(&code, None, &[1, 2]), running(&other, None, &[3])];
+
+        let entry = pinned_entry(&item, identity(&item).as_ref(), &groups, Some(&code));
+
+        assert_eq!(entry.windows, [window(1).handle, window(2).handle]);
+        assert!(entry.focused);
+    }
+
+    /// One pin can stand for several groups, as Chrome does with a group per profile.
+    #[test]
+    fn a_pinned_app_collects_windows_from_every_group_it_claims() {
+        let item = app_item("Chrome", r"C:\Chrome\chrome.exe", 1, 0);
+        let exe = Path::new(r"C:\Chrome\chrome.exe");
+        let first = AppKey::UserModelId("Chrome".to_owned());
+        let second = AppKey::UserModelId("Chrome.UserData.Profile2".to_owned());
+        let groups = [
+            running(&first, Some(exe), &[1]),
+            running(&second, Some(exe), &[2]),
+        ];
+
+        let entry = pinned_entry(&item, identity(&item).as_ref(), &groups, None);
+
+        assert_eq!(entry.windows.len(), 2);
+    }
+
+    #[test]
+    fn a_pinned_app_that_is_not_running_has_no_windows() {
+        let item = app_item("Code", r"C:\Apps\Code.exe", 1, 0);
+        let other = AppKey::Executable(r"C:\Apps\Other.exe".into());
+        let groups = [running(&other, None, &[3])];
+
+        let entry = pinned_entry(&item, identity(&item).as_ref(), &groups, None);
+
+        assert!(entry.windows.is_empty());
+        assert!(!entry.is_running());
+    }
+
+    #[test]
+    fn a_pinned_app_offers_a_new_window_through_its_own_target() {
+        let item = app_item("Kiro", r"C:\pins\Kiro.lnk", 1, 0);
+        let entry = pinned_entry(&item, identity(&item).as_ref(), &[], None);
+
+        let new = entry.new_window().expect("an app can open another window");
+        assert_eq!(new.label, "New Kiro window");
+        assert_eq!(new.launch, item.kind);
+    }
+
+    #[test]
+    fn a_running_app_offers_a_new_window_through_its_launch_target() {
+        let key = AppKey::UserModelId("Some.App_abc!App".to_owned());
+        let entry = unpinned_entry(
+            Position {
+                tab: Tab::FIRST,
+                slot: Slot::new(0).expect("slot 0"),
+            },
+            &SlotMemory::default(),
+            &[],
+            None,
+        );
+        assert_eq!(
+            entry.new_window(),
+            None,
+            "an empty slot has nothing to launch"
+        );
+
+        let entry = SlotEntry {
+            label: "App".to_owned(),
+            target: SlotTarget::Running(key),
+            ..entry
+        };
+        let new = entry
+            .new_window()
+            .expect("a running app can open another window");
+        assert_eq!(
+            new.launch,
+            ItemKind::App {
+                target: r"shell:AppsFolder\Some.App_abc!App".to_owned()
+            }
+        );
+    }
+
+    /// Only apps have windows to add to; a script or a url would just run again.
+    #[test]
+    fn anything_that_is_not_an_app_offers_no_new_window() {
+        let item = Item {
+            name: "Jira".to_owned(),
+            icon: None,
+            tab: 1,
+            slot: 0,
+            kind: ItemKind::Url {
+                url: "https://example.com".to_owned(),
+                browser: None,
+                browser_args: None,
+            },
+        };
+        let entry = pinned_entry(&item, None, &[], None);
+
+        assert_eq!(entry.new_window(), None);
     }
 
     #[test]

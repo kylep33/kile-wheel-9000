@@ -149,7 +149,7 @@ fn commit(settings: &mut Settings, editor: &ItemEditor) {
 /// Fields every type has: the name, the icon, and where it sits.
 fn draw_common(ui: &mut egui::Ui, item: &mut Item, icons_dir: &std::path::Path) {
     super::row(ui, "Name", |ui| {
-        ui.add(egui::TextEdit::singleline(&mut item.name).desired_width(320.0));
+        ui.add(egui::TextEdit::singleline(&mut item.name).desired_width(f32::INFINITY));
     });
 
     super::row(ui, "Tab", |ui| {

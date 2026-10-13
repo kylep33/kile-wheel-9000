@@ -65,6 +65,9 @@ pub const TYPE_GLYPHS: [&str; 7] = [
     "\u{E756}", // terminal: command prompt
 ];
 
+/// Marks the sub-wheel slice that opens one more window of an app.
+pub const NEW_WINDOW_GLYPH: &str = "\u{E710}";
+
 /// Shown in the hub when more apps are running than there are unpinned slots.
 pub const OVERFLOW_GLYPH: &str = "\u{E946}";
 

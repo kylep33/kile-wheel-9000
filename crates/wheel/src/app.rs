@@ -17,6 +17,7 @@ use kile_wheel_platform::clipboard;
 use kile_wheel_platform::config_watch::ConfigWatcher;
 use kile_wheel_platform::hooks::{self, HookThread, InputEvent, SharedInput};
 use kile_wheel_platform::icons::IconCache;
+use kile_wheel_platform::identity::IdentityCache;
 use kile_wheel_platform::installed;
 use kile_wheel_platform::monitor::{self, Monitor, MonitorChoice};
 use kile_wheel_platform::watcher::{Watcher, WindowEvent};
@@ -31,8 +32,8 @@ use crate::form::{Form, Outcome};
 use crate::keyboard::printable;
 use crate::overlay::{self, Overlay};
 use crate::render::{FormView, Frame, HubView, SlotView};
-use crate::slots::{Layout, SlotEntry, SlotTarget};
-use crate::state::{Back, Mode, WheelState, WindowChoice};
+use crate::slots::{self, Layout, NewWindow, SlotEntry, SlotTarget};
+use crate::state::{Back, Mode, SubChoice, SubWheel, WheelState, WindowChoice};
 use crate::theme;
 use crate::tray::{self, Tray};
 
@@ -70,6 +71,9 @@ pub struct App {
     config_watch: Option<ConfigWatcher>,
     state: WheelState,
     memory: SlotMemory<AppKey>,
+    /// What each pinned app target resolves to, so a pinned shortcut finds its windows.
+    /// Filled at startup and on config reload, never while opening.
+    identities: IdentityCache,
     layout: Layout,
     icons: IconCache,
     paths: ConfigPaths,
@@ -138,6 +142,7 @@ impl App {
             config_watch,
             state: WheelState::default(),
             memory: SlotMemory::default(),
+            identities: IdentityCache::default(),
             layout: Layout::default(),
             icons: IconCache::default(),
             paths,
@@ -152,12 +157,21 @@ impl App {
         Ok(app)
     }
 
+    fn build_layout(&mut self) -> Layout {
+        Layout::build(
+            &self.config,
+            &self.model,
+            &mut self.memory,
+            &mut self.identities,
+        )
+    }
+
     /// Draws one throwaway frame into the still-hidden window.
     ///
     /// The first draw pays for shader compilation and the first buffer allocation, which
     /// measured 64 ms. Spending it at startup keeps it out of the first open.
     fn warm_up(&mut self) {
-        self.layout = Layout::build(&self.config, &self.model, &mut self.memory);
+        self.layout = self.build_layout();
         self.load_icons();
         log_failure(self.draw_wheel());
         self.layout = Layout::default();
@@ -465,7 +479,7 @@ impl App {
                 true => None,
                 false => Some(AppCandidate {
                     name,
-                    target: launch_target(group.key),
+                    target: slots::launch_target(group.key),
                 }),
             }
         });
@@ -765,7 +779,7 @@ impl App {
         let monitor = monitor::monitor_for(choice(&self.config));
         self.overlay.place_on(monitor, &self.config)?;
 
-        self.layout = Layout::build(&self.config, &self.model, &mut self.memory);
+        self.layout = self.build_layout();
         // every tab exists whether the config mentions it or not, so an unused one is a
         // blank wheel you can fill rather than a key that does nothing
         self.state.open(Tab::MAX_COUNT);
@@ -857,7 +871,7 @@ impl App {
     fn draw(&self) -> Result<()> {
         match self.state.mode() {
             Mode::Wheel => self.draw_wheel(),
-            Mode::SubWheel { windows } => self.draw_sub_wheel(windows),
+            Mode::SubWheel(sub_wheel) => self.draw_sub_wheel(sub_wheel),
         }
     }
 
@@ -949,13 +963,21 @@ impl App {
         })
     }
 
-    fn draw_sub_wheel(&self, windows: &[WindowChoice]) -> Result<()> {
-        let slots = std::array::from_fn(|index| match windows.get(index) {
-            Some(choice) => SlotView {
+    fn draw_sub_wheel(&self, sub_wheel: &SubWheel) -> Result<()> {
+        let slots = std::array::from_fn(|index| match sub_wheel.choices.get(index) {
+            Some(SubChoice::Window(choice)) => SlotView {
                 label: &choice.title,
                 running: true,
                 filled: true,
                 window_count: 1,
+                ..SlotView::default()
+            },
+            // drawn with the app's icon and no running dot, since nothing is open there yet
+            Some(SubChoice::NewWindow(new)) => SlotView {
+                label: &new.label,
+                icon_key: new.icon_source.as_deref(),
+                type_glyph: Some(theme::NEW_WINDOW_GLYPH),
+                filled: true,
                 ..SlotView::default()
             },
             None => SlotView::default(),
@@ -963,7 +985,7 @@ impl App {
 
         // the wheel has eight slots, so a ninth window has nowhere to go; say so rather
         // than quietly dropping it
-        let hidden = windows.len().saturating_sub(Slot::COUNT);
+        let hidden = sub_wheel.hidden;
         let note = hidden_windows_note(hidden);
 
         self.overlay.draw(&Frame {
@@ -1000,11 +1022,12 @@ impl App {
             return Ok(());
         };
 
-        if let Mode::SubWheel { windows } = self.state.mode() {
-            let chosen = windows.get(slot.index()).map(|choice| choice.handle);
+        if let Mode::SubWheel(sub_wheel) = self.state.mode() {
+            let chosen = sub_wheel.choices.get(slot.index()).cloned();
             self.close();
             return match chosen {
-                Some(window) => self.focus_or_minimize(window),
+                Some(SubChoice::Window(choice)) => self.focus_or_minimize(choice.handle),
+                Some(SubChoice::NewWindow(new)) => self.open_new_window(&new),
                 None => Ok(()),
             };
         }
@@ -1021,9 +1044,11 @@ impl App {
             return Ok(());
         }
 
-        // more than one window means choose which, exactly as the taskbar does
+        // more than one window means choose which, exactly as the taskbar does, with a way
+        // to open one more alongside them
         if entry.windows.len() > 1 {
-            self.state.enter_sub_wheel(self.window_choices(entry));
+            let sub_wheel = SubWheel::new(self.window_choices(entry), entry.new_window());
+            self.state.enter_sub_wheel(sub_wheel);
             self.redraw = true;
             return Ok(());
         }
@@ -1076,13 +1101,33 @@ impl App {
         activate::focus(window).context("could not bring the window forward")
     }
 
+    /// Shift+Enter and middle click: start another copy instead of focusing one.
+    ///
+    /// On the sub-wheel the selection is a window, not a slot of the layout, so that
+    /// wheel's own new-window slice is what launches.
     fn launch_new_instance(&mut self) {
+        if let Mode::SubWheel(sub_wheel) = self.state.mode() {
+            let Some(new) = sub_wheel.new_window().cloned() else {
+                return;
+            };
+            self.close();
+            log_failure(self.open_new_window(&new));
+            return;
+        }
+
         let Some(slot) = self.state.selected() else {
             return;
         };
         let Some(entry) = self.layout.get(self.state.tab(), slot).cloned() else {
             return;
         };
+
+        // an app opens another window; anything else just runs again
+        if let Some(new) = entry.new_window() {
+            self.close();
+            log_failure(self.open_new_window(&new));
+            return;
+        }
         let SlotTarget::Pinned(item) = &entry.target else {
             return;
         };
@@ -1092,13 +1137,19 @@ impl App {
         log_failure(self.run_item(&item));
     }
 
+    fn open_new_window(&self, new: &NewWindow) -> Result<()> {
+        launch::run(&new.launch).with_context(|| format!("could not open a {}", new.label))
+    }
+
     fn reload_config(&mut self) -> Result<()> {
         let reloaded = kile_wheel_core::config::load(&self.paths.config_file())
             .context("the saved config could not be read back")?;
 
         self.shared.replace_bindings(reloaded.binding_table()?);
         self.config = reloaded;
-        self.layout = Layout::build(&self.config, &self.model, &mut self.memory);
+        // a shortcut may have been re-pointed, so resolve every target again
+        self.identities.clear();
+        self.layout = self.build_layout();
         self.redraw = true;
         Ok(())
     }
@@ -1126,7 +1177,7 @@ fn pin_as_item(entry: &SlotEntry, to: Position) -> Option<Item> {
         return None;
     };
 
-    let target = launch_target(key);
+    let target = slots::launch_target(key);
 
     Some(Item {
         name: entry.label.clone(),
@@ -1135,17 +1186,6 @@ fn pin_as_item(entry: &SlotEntry, to: Position) -> Option<Item> {
         slot: to.slot.index(),
         kind: ItemKind::App { target },
     })
-}
-
-/// What the shell launches a running app by.
-///
-/// Packaged apps go through the Apps folder, because their executable path is not what
-/// starts them.
-fn launch_target(key: &AppKey) -> String {
-    match key {
-        AppKey::Executable(path) => path.to_string_lossy().into_owned(),
-        AppKey::UserModelId(id) => format!(r"shell:AppsFolder\{id}"),
-    }
 }
 
 /// For log lines, so a move reads as the tab and slot you dragged between.

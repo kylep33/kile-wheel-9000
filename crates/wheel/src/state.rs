@@ -5,6 +5,7 @@ use kile_wheel_core::slot::{Cardinal, Slot, Tab};
 use windows::Win32::Foundation::HWND;
 
 use crate::anim::Animation;
+use crate::slots::NewWindow;
 
 /// One window of an app that has more than one open.
 #[derive(Debug, Clone)]
@@ -21,13 +22,60 @@ impl PartialEq for WindowChoice {
 
 impl Eq for WindowChoice {}
 
+/// One slice of the sub-wheel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubChoice {
+    Window(WindowChoice),
+    /// Opens one more window of the app, rather than focusing one it already has.
+    NewWindow(NewWindow),
+}
+
+/// What an app's sub-wheel shows, and how many windows had to be left off it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubWheel {
+    pub choices: Vec<SubChoice>,
+    pub hidden: usize,
+}
+
+impl SubWheel {
+    /// The app's windows, oldest first, then a way to open another.
+    ///
+    /// The new-window slice always gets a slot, so with more windows than fit it is the
+    /// last window that goes rather than the way to open one more. The hidden count says
+    /// how many were left off, so none disappears without a word.
+    pub fn new(windows: Vec<WindowChoice>, new_window: Option<NewWindow>) -> Self {
+        let room = match new_window.is_some() {
+            true => Slot::COUNT - 1,
+            false => Slot::COUNT,
+        };
+        let hidden = windows.len().saturating_sub(room);
+
+        let mut choices: Vec<SubChoice> = windows
+            .into_iter()
+            .take(room)
+            .map(SubChoice::Window)
+            .collect();
+        choices.extend(new_window.map(SubChoice::NewWindow));
+
+        Self { choices, hidden }
+    }
+
+    /// The new-window slice, wherever it landed, for Shift+Enter and middle click.
+    pub fn new_window(&self) -> Option<&NewWindow> {
+        self.choices.iter().find_map(|choice| match choice {
+            SubChoice::NewWindow(new) => Some(new),
+            SubChoice::Window(_) => None,
+        })
+    }
+}
+
 /// Which layer of the wheel is in front.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Mode {
     #[default]
     Wheel,
     /// One app's windows, reached by activating an app with more than one open.
-    SubWheel { windows: Vec<WindowChoice> },
+    SubWheel(SubWheel),
 }
 
 /// Which device last set the selection. They are allowed to mix, so the last one to move
@@ -123,7 +171,7 @@ impl WheelState {
     }
 
     pub fn in_sub_wheel(&self) -> bool {
-        matches!(self.mode, Mode::SubWheel { .. })
+        matches!(self.mode, Mode::SubWheel(_))
     }
 
     pub fn edit_mode(&self) -> bool {
@@ -211,8 +259,8 @@ impl WheelState {
     }
 
     /// Edit mode belongs to the wheel, so a sub-wheel leaves it behind.
-    pub fn enter_sub_wheel(&mut self, windows: Vec<WindowChoice>) {
-        self.mode = Mode::SubWheel { windows };
+    pub fn enter_sub_wheel(&mut self, sub_wheel: SubWheel) {
+        self.mode = Mode::SubWheel(sub_wheel);
         self.appeared.restart();
         self.edit = false;
         self.dragging = None;
@@ -426,7 +474,7 @@ mod tests {
     #[test]
     fn backspace_leaves_a_sub_wheel_before_closing() {
         let mut state = opened();
-        state.enter_sub_wheel(Vec::new());
+        state.enter_sub_wheel(SubWheel::default());
 
         assert_eq!(state.back(), Back::WentUp);
         assert!(state.is_open());
@@ -469,7 +517,7 @@ mod tests {
     #[test]
     fn a_sub_wheel_cannot_be_edited() {
         let mut state = opened();
-        state.enter_sub_wheel(Vec::new());
+        state.enter_sub_wheel(SubWheel::default());
 
         assert!(!state.toggle_edit());
         assert!(!state.select_tab(2));
@@ -480,7 +528,7 @@ mod tests {
         let mut state = opened();
         state.toggle_edit();
 
-        state.enter_sub_wheel(Vec::new());
+        state.enter_sub_wheel(SubWheel::default());
 
         assert!(!state.edit_mode());
     }

@@ -6,6 +6,7 @@ pub mod clipboard;
 pub mod config_watch;
 pub mod hooks;
 pub mod icons;
+pub mod identity;
 pub mod installed;
 pub mod instance;
 pub mod known_folders;

@@ -22,7 +22,12 @@ pub struct Settings {
     pub terminal_profiles: Vec<String>,
     pub wsl_distros: Vec<String>,
     pub editor: Option<pages::ItemEditor>,
+    /// Which view the scroll offset belongs to.
+    scrolled_view: View,
 }
+
+/// A page, plus whether the item editor is over it.
+type View = (Page, bool);
 
 impl Settings {
     pub fn load(paths: ConfigPaths) -> Result<Self> {
@@ -34,6 +39,7 @@ impl Settings {
             terminal_profiles: sources::terminal_profiles(),
             wsl_distros: sources::wsl_distros(),
             editor: None,
+            scrolled_view: (Page::General, false),
         })
     }
 
@@ -80,9 +86,7 @@ impl eframe::App for Settings {
 
         egui::Panel::bottom("save").show(ui, |ui| self.draw_save_bar(ui));
 
-        egui::CentralPanel::default_margins().show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| pages::draw(self, ui));
-        });
+        egui::CentralPanel::default_margins().show(ui, |ui| self.draw_page(ui));
     }
 }
 
@@ -105,6 +109,19 @@ impl Settings {
         if backspace && !typing {
             self.go_back();
         }
+    }
+
+    /// A new view starts at the top, or a scrolled page leaves the next one off screen.
+    fn draw_page(&mut self, ui: &mut egui::Ui) {
+        let view = (self.page, self.editor.is_some());
+        let mut area = egui::ScrollArea::vertical();
+
+        if view != self.scrolled_view {
+            area = area.vertical_scroll_offset(0.0);
+        }
+        self.scrolled_view = view;
+
+        area.show(ui, |ui| pages::draw(self, ui));
     }
 
     fn draw_sidebar(&mut self, ui: &mut egui::Ui) {

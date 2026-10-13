@@ -11,6 +11,10 @@ pub use items::ItemEditor;
 
 use crate::ui::Settings;
 
+const LABEL_WIDTH_PX: f32 = 180.0;
+const BROWSE_WIDTH_PX: f32 = 90.0;
+const MIN_FIELD_WIDTH_PX: f32 = 120.0;
+
 /// Section order, which is also the sidebar order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
@@ -64,14 +68,13 @@ pub fn heading(ui: &mut egui::Ui, title: &str, blurb: &str) {
     ui.add_space(8.0);
 }
 
-/// A labelled row, so every field on every page lines up.
+/// A labelled row, so every field on every page lines up. Contents wrap, because the
+/// page only scrolls vertically and anything past the right edge is unreachable.
 pub fn row(ui: &mut egui::Ui, label: &str, contents: impl FnOnce(&mut egui::Ui)) {
-    const LABEL_WIDTH_PX: f32 = 180.0;
-
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.add_sized(
             [LABEL_WIDTH_PX, ui.spacing().interact_size.y],
-            egui::Label::new(label),
+            egui::Label::new(label).truncate(),
         );
         contents(ui);
     });
@@ -85,7 +88,7 @@ pub fn path_row(
     pick: impl FnOnce() -> Option<std::path::PathBuf>,
 ) {
     row(ui, label, |ui| {
-        ui.add(egui::TextEdit::singleline(value).desired_width(f32::INFINITY - 90.0));
+        ui.add(egui::TextEdit::singleline(value).desired_width(field_width_px(ui)));
         if !ui.button("Browse").clicked() {
             return;
         }
@@ -93,6 +96,20 @@ pub fn path_row(
             *value = path.to_string_lossy().into_owned();
         }
     });
+}
+
+/// A path that cannot be edited, elided to one line with the whole thing on hover.
+pub fn path_label(ui: &mut egui::Ui, path: &std::path::Path) {
+    let text = path.to_string_lossy();
+
+    ui.add(egui::Label::new(text.as_ref()).truncate())
+        .on_hover_text(text.as_ref());
+}
+
+/// Leaves room for the Browse button, so a long path clips inside the field instead of
+/// pushing the button off the window.
+fn field_width_px(ui: &egui::Ui) -> f32 {
+    (ui.available_width() - BROWSE_WIDTH_PX).max(MIN_FIELD_WIDTH_PX)
 }
 
 /// Keeps an optional string and a text field in step: blank means unset.

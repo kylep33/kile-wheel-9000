@@ -12,8 +12,8 @@ use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows::Win32::Storage::EnhancedStorage::PKEY_AppUserModel_ID;
 use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GW_OWNER, GWL_EXSTYLE, GetForegroundWindow, GetWindow, GetWindowLongPtrW,
-    IsWindowVisible, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    EnumWindows, GA_ROOT, GW_OWNER, GWL_EXSTYLE, GetAncestor, GetForegroundWindow, GetWindow,
+    GetWindowLongPtrW, IsWindowVisible, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 use windows::core::{BOOL, Result};
 
@@ -191,12 +191,31 @@ pub fn is_taskbar_window(window: HWND) -> bool {
     if !unsafe { IsWindowVisible(window) }.as_bool() {
         return false;
     }
+    if !is_top_level(window) {
+        return false;
+    }
     if is_shell_class(window) || !has_title(window) || !has_app_window_style(window) {
         return false;
     }
 
     // a cloaked packaged-app host is suspended, not merely off-desktop
     !(is_uwp_host(window) && is_cloaked(window))
+}
+
+/// Only top-level windows are taskbar entries.
+///
+/// The startup sweep only ever sees top-level windows, but window events also fire for
+/// children. Chromium and Electron apps (Chrome, Kiro, VS Code, Obsidian) each host a
+/// visible, titled child, "Chrome Legacy Window", which passes every other check because
+/// a child has a parent rather than an owner. Without this it joined the app's group as a
+/// second window.
+///
+/// The `WS_CHILD` style is not used, because some genuinely top-level windows carry it.
+/// Being its own root is what top-level actually means.
+fn is_top_level(window: HWND) -> bool {
+    // SAFETY: returns a borrowed handle or null, no pointers involved.
+    let root = unsafe { GetAncestor(window, GA_ROOT) };
+    root == window
 }
 
 fn has_app_window_style(window: HWND) -> bool {
@@ -269,4 +288,40 @@ unsafe extern "system" fn collect_window(window: HWND, param: LPARAM) -> BOOL {
     let found = unsafe { &mut *(param.0 as *mut Vec<HWND>) };
     found.push(window);
     TRUE
+}
+
+#[cfg(test)]
+mod tests {
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GW_CHILD};
+    use windows::core::w;
+
+    use super::*;
+
+    /// Every window the startup sweep returns is top-level, so the new check must not
+    /// throw any of them away.
+    #[test]
+    fn every_enumerated_window_counts_as_top_level() {
+        let windows = enumerate_windows().expect("windows can be enumerated");
+
+        assert!(!windows.is_empty());
+        assert!(windows.iter().all(|window| is_top_level(*window)));
+    }
+
+    /// The regression: a child window, like Chromium's "Chrome Legacy Window", must never
+    /// become a taskbar entry, whatever its title and visibility say. The taskbar's own
+    /// children stand in for it, since they are present on any desktop.
+    #[test]
+    fn a_child_window_is_never_a_taskbar_window() {
+        // SAFETY: looks a window up by class; null when there is no taskbar.
+        let Ok(taskbar) = (unsafe { FindWindowW(w!("Shell_TrayWnd"), None) }) else {
+            return;
+        };
+        // SAFETY: returns a borrowed handle or an error when there are no children.
+        let Ok(child) = (unsafe { GetWindow(taskbar, GW_CHILD) }) else {
+            return;
+        };
+
+        assert!(!is_top_level(child));
+        assert!(!is_taskbar_window(child));
+    }
 }
