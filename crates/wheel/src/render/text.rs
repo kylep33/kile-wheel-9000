@@ -3,8 +3,9 @@
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
     DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_WRAP,
-    DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat,
+    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
+    DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_WORD_WRAPPING_WRAP, DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat,
 };
 use windows::core::{HSTRING, Result};
 
@@ -20,6 +21,10 @@ pub struct Fonts {
     hub_date: IDWriteTextFormat,
     cog: IDWriteTextFormat,
     glyph: IDWriteTextFormat,
+    /// A form value at rest: one line, cut short with an ellipsis.
+    value: IDWriteTextFormat,
+    /// A form value being edited: one line, never cut, so it can scroll under the caret.
+    editing: IDWriteTextFormat,
 }
 
 impl Fonts {
@@ -72,8 +77,18 @@ impl Fonts {
                 DWRITE_FONT_WEIGHT_NORMAL,
                 metrics.number_size_px,
             )?,
+            value: single_line(&factory, metrics.number_size_px, Ending::Ellipsis)?,
+            editing: single_line(&factory, metrics.number_size_px, Ending::Full)?,
         };
         Ok((fonts, factory))
+    }
+
+    pub fn value(&self) -> &IDWriteTextFormat {
+        &self.value
+    }
+
+    pub fn editing(&self) -> &IDWriteTextFormat {
+        &self.editing
     }
 
     pub fn label(&self) -> &IDWriteTextFormat {
@@ -103,6 +118,52 @@ impl Fonts {
     pub fn glyph(&self) -> &IDWriteTextFormat {
         &self.glyph
     }
+}
+
+/// How a single-line value ends when it is longer than its box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    Ellipsis,
+    Full,
+}
+
+/// A left-aligned, one-line format for form values.
+///
+/// A long path wrapping onto a second line spills out of its row, so values stay on one
+/// line and run east to west instead. Left alignment is also what the caret maths
+/// assumes: it measures the text before the caret from the left edge of the box.
+fn single_line(
+    factory: &IDWriteFactory,
+    size_px: f32,
+    ending: Ending,
+) -> Result<IDWriteTextFormat> {
+    let format = centred(
+        factory,
+        theme::LABEL_FONT,
+        DWRITE_FONT_WEIGHT_NORMAL,
+        size_px,
+    )?;
+
+    // SAFETY: the format was just created and is not shared yet.
+    unsafe {
+        format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING)?;
+        format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+    }
+    if ending == Ending::Full {
+        return Ok(format);
+    }
+
+    // SAFETY: the sign is built from the format it is attached to, and both live on.
+    unsafe {
+        let sign = factory.CreateEllipsisTrimmingSign(&format)?;
+        let trimming = DWRITE_TRIMMING {
+            granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+            delimiter: 0,
+            delimiterCount: 0,
+        };
+        format.SetTrimming(&raw const trimming, &sign)?;
+    }
+    Ok(format)
 }
 
 fn centred(

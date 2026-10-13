@@ -5,7 +5,7 @@ use kile_wheel_core::binding::Binding;
 use kile_wheel_core::config::{self, Config, ConfigDocument, HotkeyConfig, TabSettings};
 use kile_wheel_core::item::{Item, Position};
 use kile_wheel_core::names::ConfigPaths;
-use kile_wheel_core::slot::{Slot, Tab};
+use kile_wheel_core::slot::Slot;
 
 /// A working copy of the config plus whether it differs from what is on disk.
 #[derive(Debug)]
@@ -110,19 +110,6 @@ impl Draft {
         Ok(())
     }
 
-    /// The first free slot, so a new item never lands on top of an existing one.
-    pub fn first_free_position(&self) -> Option<Position> {
-        let taken: Vec<Position> = self
-            .working
-            .items
-            .iter()
-            .filter_map(Item::position)
-            .collect();
-
-        kile_wheel_core::layout::positions(Tab::MAX_COUNT)
-            .find(|position| !taken.contains(position))
-    }
-
     /// Adds a tab entry if the number does not have one yet.
     pub fn ensure_tab(&mut self, number: usize) {
         if self.working.tabs.iter().any(|tab| tab.index == number) {
@@ -176,6 +163,7 @@ fn same_wheel(left: &config::WheelSettings, right: &config::WheelSettings) -> bo
         && left.opacity.to_bits() == right.opacity.to_bits()
         && left.accent == right.accent
         && left.empty_quips == right.empty_quips
+        && left.hidden_apps == right.hidden_apps
 }
 
 fn same_hotkeys(left: &[HotkeyConfig], right: &[HotkeyConfig]) -> bool {

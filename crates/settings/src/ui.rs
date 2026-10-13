@@ -22,6 +22,9 @@ pub struct Settings {
     pub terminal_profiles: Vec<String>,
     pub wsl_distros: Vec<String>,
     pub editor: Option<pages::ItemEditor>,
+    /// The Items page's tab and selected slot, kept across visits so leaving and coming
+    /// back lands where you were.
+    pub items_view: pages::ItemsView,
     /// Which view the scroll offset belongs to.
     scrolled_view: View,
 }
@@ -39,6 +42,7 @@ impl Settings {
             terminal_profiles: sources::terminal_profiles(),
             wsl_distros: sources::wsl_distros(),
             editor: None,
+            items_view: pages::ItemsView::default(),
             scrolled_view: (Page::General, false),
         })
     }

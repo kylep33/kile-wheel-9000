@@ -4,10 +4,11 @@ mod about;
 mod general;
 mod hotkeys;
 mod items;
+mod mini_wheel;
 mod tabs;
 mod wheel;
 
-pub use items::ItemEditor;
+pub use items::{ItemEditor, ItemsView};
 
 use crate::ui::Settings;
 

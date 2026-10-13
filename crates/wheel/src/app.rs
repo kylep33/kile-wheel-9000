@@ -473,8 +473,13 @@ impl App {
             .map(|candidate| candidate.name.to_lowercase())
             .collect();
 
+        // named after the app, as its slot would be, rather than after whichever window
+        // happens to be first: a browser's first window title is a web page
         let running = self.model.groups().into_iter().filter_map(|group| {
-            let name = group.windows.first()?.title.to_owned();
+            if group.windows.is_empty() || slots::is_hidden(&self.config, &group) {
+                return None;
+            }
+            let name = slots::group_label(&group);
             match pinned_names.contains(&name.to_lowercase()) {
                 true => None,
                 false => Some(AppCandidate {

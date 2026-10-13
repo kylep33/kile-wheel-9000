@@ -75,6 +75,27 @@ pub fn split_row(row: D2D_RECT_F, label_ratio: f32) -> (D2D_RECT_F, D2D_RECT_F) 
     (label, value)
 }
 
+/// How far to slide a value being edited to the left, so the caret stays in its box.
+///
+/// Nothing moves while the caret fits, so short values sit still as you type. Once the
+/// caret would pass the right edge, the text slides by exactly the overshoot plus a small
+/// margin, keeping a few characters of context to the caret's right.
+pub fn caret_scroll(caret_px: f32, box_width_px: f32, margin_px: f32) -> f32 {
+    let visible = (box_width_px - margin_px).max(0.0);
+    (caret_px - visible).max(0.0)
+}
+
+/// Pulls a box in on both sides, so text does not touch its edges.
+pub fn inset(rect: D2D_RECT_F, by_px: f32) -> D2D_RECT_F {
+    let by_px = by_px.min((rect.right - rect.left) / 2.0).max(0.0);
+
+    D2D_RECT_F {
+        left: rect.left + by_px,
+        right: rect.right - by_px,
+        ..rect
+    }
+}
+
 fn arc(
     to: Vector2,
     radius_px: f32,
@@ -127,5 +148,32 @@ mod tests {
         let (label, value) = split_row(ROW, 0.33);
 
         assert_eq!(label.right, value.left);
+    }
+
+    #[test]
+    fn a_caret_that_fits_does_not_scroll() {
+        assert_eq!(caret_scroll(0.0, 120.0, 10.0), 0.0);
+        assert_eq!(caret_scroll(110.0, 120.0, 10.0), 0.0);
+    }
+
+    /// A long path scrolls left by just enough to keep the caret and a margin in view.
+    #[test]
+    fn a_caret_past_the_edge_scrolls_by_the_overshoot() {
+        assert_eq!(caret_scroll(300.0, 120.0, 10.0), 190.0);
+    }
+
+    #[test]
+    fn a_box_narrower_than_its_margin_scrolls_the_caret_to_the_edge() {
+        assert_eq!(caret_scroll(50.0, 5.0, 10.0), 50.0);
+    }
+
+    #[test]
+    fn insetting_keeps_the_height_and_never_inverts() {
+        let inner = inset(ROW, 6.0);
+        assert_eq!((inner.left, inner.right), (106.0, 294.0));
+        assert_eq!((inner.top, inner.bottom), (ROW.top, ROW.bottom));
+
+        let squeezed = inset(ROW, 500.0);
+        assert!(squeezed.left <= squeezed.right);
     }
 }

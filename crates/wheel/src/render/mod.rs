@@ -18,10 +18,11 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
-    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, D2D1CreateFactory, ID2D1Bitmap1,
-    ID2D1DeviceContext, ID2D1Factory1, ID2D1Image, ID2D1PathGeometry1, ID2D1SolidColorBrush,
+    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
+    D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_ELLIPSE,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+    D2D1CreateFactory, ID2D1Bitmap1, ID2D1DeviceContext, ID2D1Factory1, ID2D1Image,
+    ID2D1PathGeometry1, ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
@@ -77,6 +78,10 @@ const FORM_TEXT_THRESHOLD: f32 = 0.55;
 const FORM_EDGE_MARGIN_PX: f32 = 6.0;
 const CARET_WIDTH_PX: f32 = 1.6;
 const CARET_INSET_PX: f32 = 3.0;
+/// Room kept to the right of the caret once a long value starts scrolling.
+const CARET_SCROLL_MARGIN_PX: f32 = 14.0;
+/// Keeps a value's text off the edge of its column.
+const VALUE_PADDING_PX: f32 = 4.0;
 
 /// Where the open animation starts the wheel. Close enough to full size that the wheel is
 /// readable on the first frame, far enough to read as arriving.
@@ -430,28 +435,61 @@ impl Renderer {
             return;
         };
 
-        let text = match value {
-            RowValue::Text { before, after } => format!("{before}{after}"),
-            RowValue::Toggle(on) => match on {
-                true => "yes".to_owned(),
-                false => "no".to_owned(),
-            },
-            RowValue::Choice(chosen) => format!("< {chosen} >"),
+        let (before, after) = match value {
+            RowValue::Text { before, after } => (before, after),
+            RowValue::Toggle(on) => {
+                let text = match on {
+                    true => "yes",
+                    false => "no",
+                };
+                self.draw_text(text, bounds, self.fonts.number(), colour);
+                return;
+            }
+            RowValue::Choice(chosen) => {
+                self.draw_text(
+                    &format!("< {chosen} >"),
+                    bounds,
+                    self.fonts.number(),
+                    colour,
+                );
+                return;
+            }
         };
-        self.draw_text(&text, bounds, self.fonts.number(), colour);
 
+        let bounds = form::inset(bounds, VALUE_PADDING_PX);
+        let text = format!("{before}{after}");
+
+        // at rest a long value is cut short with an ellipsis, so it stays on its line
         if !line.focused {
+            self.draw_text(&text, bounds, self.fonts.value(), colour);
             return;
         }
-        let RowValue::Text { before, .. } = value else {
-            return;
+
+        // being edited it shows in full, sliding left under the caret so the part you are
+        // typing is always in view; the clip keeps the overflow off the label column
+        let caret_px = self.measure(before, self.fonts.editing());
+        let scroll_px =
+            form::caret_scroll(caret_px, bounds.right - bounds.left, CARET_SCROLL_MARGIN_PX);
+        let slid = D2D_RECT_F {
+            left: bounds.left - scroll_px,
+            right: f32::MAX,
+            ..bounds
         };
-        self.draw_caret(bounds, before);
+
+        // SAFETY: the clip is pushed and popped around the draws it applies to.
+        unsafe {
+            self.context
+                .PushAxisAlignedClip(&bounds, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        }
+        self.draw_text(&text, slid, self.fonts.editing(), colour);
+        self.draw_caret(bounds, caret_px - scroll_px);
+        // SAFETY: pairs the push above.
+        unsafe { self.context.PopAxisAlignedClip() };
     }
 
-    fn draw_caret(&self, bounds: D2D_RECT_F, before: &str) {
-        let offset = self.measure(before, self.fonts.number());
-        let x = bounds.left + offset;
+    /// `offset_px` is where the caret sits from the box's left edge, already scrolled.
+    fn draw_caret(&self, bounds: D2D_RECT_F, offset_px: f32) {
+        let x = bounds.left + offset_px;
         let caret = D2D_RECT_F {
             left: x,
             top: bounds.top + CARET_INSET_PX,

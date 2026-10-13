@@ -49,6 +49,8 @@ empty_quips = [
     "room for rent",
     "insert app here",
 ]
+# running apps that never take an unpinned slot, by exe name, for things like status bars
+hidden_apps = ["komorebi-bar.exe"]
 
 # Up to nine tabs, numbered 1 to 9 and selected with the number keys.
 [[tabs]]

@@ -115,10 +115,11 @@ impl Layout {
         let focused = model.focused_key();
 
         // a running app that is already pinned shows in its pinned slot, so it must not
-        // also claim an unpinned one
+        // also claim an unpinned one; a hidden app claims none at all
         let open_slots = unpinned_slots(config);
         let spare: Vec<AppKey> = groups
             .iter()
+            .filter(|group| !is_hidden(config, group))
             .filter(|group| {
                 !pinned
                     .iter()
@@ -248,6 +249,16 @@ fn claims(identity: &AppIdentity, group: &AppGroup<'_>) -> bool {
     identity.matches(group.key, group.executable)
 }
 
+/// Checked against the group's exe, which is known even for apps grouped by id.
+pub fn is_hidden(config: &Config, group: &AppGroup<'_>) -> bool {
+    let executable = match (group.executable, group.key) {
+        (Some(path), _) => path,
+        (None, AppKey::Executable(path)) => path.as_path(),
+        (None, AppKey::UserModelId(_)) => return false,
+    };
+    config.wheel.hides(executable)
+}
+
 /// The icon comes from a user-supplied image when one is configured, otherwise from the
 /// item's own target. A configured path is relative to the config folder, so the caller
 /// resolves it before handing it over.
@@ -266,7 +277,7 @@ fn icon_path(key: &AppKey) -> String {
 ///
 /// The executable is preferred over the grouping key, because a packaged-app id often
 /// carries a profile suffix and reads badly, as in `MSEdge.UserData.Profile2`.
-fn group_label(group: &AppGroup<'_>) -> String {
+pub fn group_label(group: &AppGroup<'_>) -> String {
     if let Some(stem) = group.executable.and_then(Path::file_stem) {
         return stem.to_string_lossy().into_owned();
     }
@@ -367,6 +378,27 @@ mod tests {
             return None;
         };
         Some(AppIdentity::unresolved(target))
+    }
+
+    #[test]
+    fn a_hidden_app_is_known_by_its_executable() {
+        let config = Config::default();
+        let bar = AppKey::Executable(r"C:\komorebi\bin\komorebi-bar.exe".into());
+        let code = AppKey::Executable(r"C:\Apps\Code.exe".into());
+
+        assert!(is_hidden(&config, &group(&bar, None)));
+        assert!(!is_hidden(&config, &group(&code, None)));
+    }
+
+    /// A packaged app is grouped by id, so the hidden list has to look at its exe instead.
+    #[test]
+    fn a_hidden_app_grouped_by_id_is_known_through_its_executable() {
+        let config = Config::default();
+        let key = AppKey::UserModelId("Some.Bar".to_owned());
+        let exe = Path::new(r"C:\komorebi\bin\komorebi-bar.exe");
+
+        assert!(is_hidden(&config, &group(&key, Some(exe))));
+        assert!(!is_hidden(&config, &group(&key, None)));
     }
 
     #[test]

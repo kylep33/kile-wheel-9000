@@ -101,6 +101,9 @@ pub struct WheelSettings {
     pub opacity: f32,
     pub accent: String,
     pub empty_quips: Vec<String>,
+    /// Running apps that never take an unpinned slot, by exe name. For windows that look
+    /// like apps to Windows but are really part of the desktop, such as a status bar.
+    pub hidden_apps: Vec<String>,
 }
 
 impl Default for WheelSettings {
@@ -114,11 +117,33 @@ impl Default for WheelSettings {
             opacity: 1.0,
             accent: format!("{FALLBACK_ACCENT}"),
             empty_quips: default_quips(),
+            hidden_apps: default_hidden_apps(),
         }
     }
 }
 
 impl WheelSettings {
+    /// Whether a running app is on the hidden list.
+    ///
+    /// An entry matches the exe's file name with or without `.exe`, or its full path,
+    /// ignoring case, so `komorebi-bar`, `komorebi-bar.exe` and the full path all work.
+    pub fn hides(&self, executable: &std::path::Path) -> bool {
+        let name = executable.file_name().and_then(std::ffi::OsStr::to_str);
+        let stem = executable.file_stem().and_then(std::ffi::OsStr::to_str);
+        let full = executable.to_str();
+
+        self.hidden_apps
+            .iter()
+            .map(|entry| entry.trim())
+            .any(|entry| {
+                !entry.is_empty()
+                    && [name, stem, full]
+                        .into_iter()
+                        .flatten()
+                        .any(|candidate| candidate.eq_ignore_ascii_case(entry))
+            })
+    }
+
     /// Clamped, because a config typo should not make the wheel unusable.
     pub fn scale(&self) -> f32 {
         self.size.clamp(MIN_SCALE, MAX_SCALE)
@@ -131,6 +156,13 @@ impl WheelSettings {
     pub fn accent(&self) -> Rgb {
         Rgb::parse(&self.accent).unwrap_or(FALLBACK_ACCENT)
     }
+}
+
+/// komorebi's status bar flags its window as a taskbar app, so nothing about it says it is
+/// part of the desktop. It is hidden out of the box because the wheel is usually run
+/// alongside it.
+fn default_hidden_apps() -> Vec<String> {
+    vec!["komorebi-bar.exe".to_owned()]
 }
 
 fn default_quips() -> Vec<String> {
@@ -422,6 +454,41 @@ mod tests {
         config.validate().expect("the default must validate");
         assert_eq!(config.tab_count(), 1);
         assert!(!config.wheel.empty_quips.is_empty());
+        assert!(config.wheel.hides(std::path::Path::new("komorebi-bar.exe")));
+    }
+
+    /// An existing config written before the list existed still hides the status bar,
+    /// because a missing key falls back to the default rather than to an empty list.
+    #[test]
+    fn a_config_without_the_list_hides_the_default_apps() {
+        let config: Config = toml::from_str("[wheel]\nsize = 1.0\n").expect("parses");
+
+        assert!(config.wheel.hides(std::path::Path::new(
+            r"C:\Program Files\komorebi\bin\komorebi-bar.exe"
+        )));
+    }
+
+    #[test]
+    fn a_hidden_app_matches_by_name_stem_or_path_whatever_the_case() {
+        let path = std::path::Path::new(r"C:\Tools\Status-Bar.EXE");
+        for entry in ["status-bar.exe", "STATUS-BAR", r"c:\tools\status-bar.exe"] {
+            let settings = WheelSettings {
+                hidden_apps: vec![entry.to_owned()],
+                ..WheelSettings::default()
+            };
+            assert!(settings.hides(path), "{entry}");
+        }
+    }
+
+    #[test]
+    fn an_empty_list_hides_nothing_and_a_blank_entry_matches_nothing() {
+        let path = std::path::Path::new(r"C:\Tools\app.exe");
+        let settings = WheelSettings {
+            hidden_apps: vec![String::new(), "   ".to_owned(), "other.exe".to_owned()],
+            ..WheelSettings::default()
+        };
+
+        assert!(!settings.hides(path));
     }
 
     #[test]

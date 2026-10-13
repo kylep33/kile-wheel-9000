@@ -1,10 +1,37 @@
 //! Items: everything pinned to a slot, of every type.
+//!
+//! Shown as a small copy of the wheel, one tab at a time, so a slot is picked where it
+//! actually sits. Click a slice to see it, double-click to edit, drag one onto another to
+//! swap them.
 
 use kile_wheel_core::item::{Item, ItemKind, SCRIPT_PRESETS, SnippetMode};
 use kile_wheel_core::slot::{Slot, Tab};
 
+use super::mini_wheel::{self, DragState, Palette, SliceView, WheelSpec};
 use crate::draft::slot_label;
 use crate::ui::Settings;
+
+/// Below this the wheel and its details stack instead of sitting side by side.
+const SIDE_BY_SIDE_MIN_PX: f32 = 640.0;
+const DETAILS_MIN_PX: f32 = 260.0;
+
+/// Which tab the page is showing and which slice is picked.
+#[derive(Debug, Clone, Copy)]
+pub struct ItemsView {
+    tab: Tab,
+    selected: Option<Slot>,
+    drag: DragState,
+}
+
+impl Default for ItemsView {
+    fn default() -> Self {
+        Self {
+            tab: Tab::FIRST,
+            selected: Slot::new(0),
+            drag: DragState::default(),
+        }
+    }
+}
 
 /// The item being added or edited, held apart from the config so Cancel is possible.
 #[derive(Debug, Clone)]
@@ -22,78 +49,342 @@ pub fn draw(settings: &mut Settings, ui: &mut egui::Ui) {
     draw_list(settings, ui);
 }
 
+/// What a frame of the wheel view asked for. Gathered first and applied after, because
+/// the drawing borrows the items the actions change.
+#[derive(Debug, Default)]
+struct Requests {
+    edit: Option<usize>,
+    add: Option<(Slot, usize)>,
+    remove: Option<usize>,
+    swap: Option<(Slot, Slot)>,
+}
+
 fn draw_list(settings: &mut Settings, ui: &mut egui::Ui) {
     super::heading(
         ui,
         "Items",
-        "Everything pinned to a slot. Unpinned running apps fill whatever is left.",
+        "Click a slot to see it, double-click to edit, drag one onto another to swap them.",
     );
 
-    if settings.draft.working.items.is_empty() {
-        ui.label("Nothing pinned yet. Every slot is filled by whatever is running.");
-        ui.add_space(8.0);
+    cycle_tabs_with_keys(settings, ui);
+    draw_tab_strip(settings, ui);
+    ui.add_space(12.0);
+
+    let mut requests = Requests::default();
+    let side_by_side = ui.available_width() >= SIDE_BY_SIDE_MIN_PX;
+
+    match side_by_side {
+        true => {
+            ui.horizontal_top(|ui| {
+                draw_wheel(settings, ui, &mut requests);
+                ui.add_space(16.0);
+                ui.vertical(|ui| {
+                    ui.set_min_width(DETAILS_MIN_PX);
+                    draw_details(settings, ui, &mut requests);
+                });
+            });
+        }
+        false => {
+            ui.vertical_centered(|ui| draw_wheel(settings, ui, &mut requests));
+            ui.add_space(12.0);
+            draw_details(settings, ui, &mut requests);
+        }
     }
 
-    let mut edit = None;
-    let mut remove = None;
+    apply(settings, requests);
+}
 
-    for (index, item) in settings.draft.working.items.iter().enumerate() {
-        ui.horizontal(|ui| {
-            ui.label(position_text(item));
-            ui.label(format!("{:<9}", item.kind.type_name()));
-            ui.label(&item.name);
-
-            if ui.button("Edit").clicked() {
-                edit = Some(index);
-            }
-            if ui.button("Remove").clicked() {
-                remove = Some(index);
-            }
-        });
+/// Left and right step through the tabs while nothing is being typed into.
+fn cycle_tabs_with_keys(settings: &mut Settings, ui: &egui::Ui) {
+    let typing = ui.ctx().memory(|memory| memory.focused().is_some());
+    if typing {
+        return;
     }
 
-    if let Some(index) = remove {
+    let (back, forward) = ui.input(|input| {
+        (
+            input.key_pressed(egui::Key::ArrowLeft) || input.key_pressed(egui::Key::PageUp),
+            input.key_pressed(egui::Key::ArrowRight) || input.key_pressed(egui::Key::PageDown),
+        )
+    });
+    match (back, forward) {
+        (true, false) => settings.items_view.tab = step_tab(settings.items_view.tab, -1),
+        (false, true) => settings.items_view.tab = step_tab(settings.items_view.tab, 1),
+        _ => {}
+    }
+}
+
+fn draw_tab_strip(settings: &mut Settings, ui: &mut egui::Ui) {
+    let current = settings.items_view.tab;
+
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .button("◀")
+            .on_hover_text("Previous tab (Left)")
+            .clicked()
+        {
+            settings.items_view.tab = step_tab(current, -1);
+        }
+
+        for number in 1..=Tab::MAX_COUNT {
+            let Some(tab) = Tab::from_number(number) else {
+                continue;
+            };
+            let used = items_on(&settings.draft.working.items, tab);
+            let label = tab_chip_label(settings, tab, used);
+
+            let chip = egui::Button::selectable(tab == current, label);
+            let response = ui.add(chip).on_hover_text(match used {
+                0 => "Nothing here yet".to_owned(),
+                1 => "1 slot used".to_owned(),
+                count => format!("{count} slots used"),
+            });
+            if response.clicked() {
+                settings.items_view.tab = tab;
+            }
+        }
+
+        if ui.button("▶").on_hover_text("Next tab (Right)").clicked() {
+            settings.items_view.tab = step_tab(current, 1);
+        }
+    });
+}
+
+/// A used tab says how full it is; an empty one is just its number, dimmed.
+fn tab_chip_label(settings: &Settings, tab: Tab, used: usize) -> egui::RichText {
+    let name = tab_name(settings, tab);
+    let text = match name {
+        Some(name) => format!("{} {}", tab.number(), mini_wheel::shorten(&name, 12)),
+        None => tab.number().to_string(),
+    };
+
+    match used {
+        0 => egui::RichText::new(text).weak(),
+        _ => egui::RichText::new(format!("{text} · {used}")),
+    }
+}
+
+fn draw_wheel(settings: &mut Settings, ui: &mut egui::Ui, requests: &mut Requests) {
+    let tab = settings.items_view.tab;
+    let items = &settings.draft.working.items;
+
+    let slices: [SliceView; Slot::COUNT] = std::array::from_fn(|index| {
+        let slot = Slot::new(index).expect("index is below the slot count");
+        match item_at(items, tab, slot).map(|index| &items[index]) {
+            Some(item) => SliceView {
+                label: item.name.clone(),
+                caption: caption(&item.kind).to_owned(),
+                filled: !item.kind.is_unpinned(),
+                reserved: item.kind.is_unpinned(),
+            },
+            None => SliceView::default(),
+        }
+    });
+
+    let accent = settings.draft.working.wheel.accent();
+    let palette = Palette::from_visuals(
+        ui.visuals(),
+        egui::Color32::from_rgb(accent.red, accent.green, accent.blue),
+    );
+    let hub_title = format!("TAB {}", tab.number());
+    let hub_caption = tab_name(settings, tab).unwrap_or_default();
+    let diameter = mini_wheel::diameter_for(ui.available_rect_before_wrap());
+
+    let spec = WheelSpec {
+        diameter_px: diameter,
+        slices: &slices,
+        selected: settings.items_view.selected,
+        hub_title: &hub_title,
+        hub_caption: &hub_caption,
+        palette,
+    };
+    let input = mini_wheel::show(ui, &spec, &mut settings.items_view.drag);
+
+    if let Some(slot) = input.clicked {
+        settings.items_view.selected = Some(slot);
+    }
+    if let Some(slot) = input.double_clicked {
+        settings.items_view.selected = Some(slot);
+        match item_at(&settings.draft.working.items, tab, slot) {
+            Some(index) => requests.edit = Some(index),
+            // an empty slot opens on the commonest thing to put there
+            None => requests.add = Some((slot, PINNED_APP_TYPE)),
+        }
+    }
+    if let Some((from, to)) = input.dropped {
+        requests.swap = Some((from, to));
+    }
+}
+
+/// `ItemKind::NAMES` index of a pinned app, the default for a double-clicked empty slot.
+const PINNED_APP_TYPE: usize = 1;
+
+fn draw_details(settings: &mut Settings, ui: &mut egui::Ui, requests: &mut Requests) {
+    let tab = settings.items_view.tab;
+    let Some(slot) = settings.items_view.selected else {
+        ui.weak("Pick a slot on the wheel.");
+        return;
+    };
+
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_min_width(DETAILS_MIN_PX);
+        ui.weak(format!("Tab {} · {}", tab.number(), slot_label(slot)));
+        ui.add_space(4.0);
+
+        let index = item_at(&settings.draft.working.items, tab, slot);
+        match index {
+            Some(index) => draw_filled(ui, &settings.draft.working.items[index], index, requests),
+            None => draw_empty(ui, slot, requests),
+        }
+    });
+
+    ui.add_space(8.0);
+    ui.weak("Left and Right switch tabs. Changes wait for Save.");
+}
+
+fn draw_filled(ui: &mut egui::Ui, item: &Item, index: usize, requests: &mut Requests) {
+    // a long name is cut to the panel and shown in full on hover, never pushed sideways
+    ui.add(egui::Label::new(egui::RichText::new(&item.name).heading()).truncate())
+        .on_hover_text(&item.name);
+    ui.label(item.kind.type_name());
+
+    if let Some(detail) = summary(&item.kind) {
+        ui.add_space(4.0);
+        ui.add(egui::Label::new(egui::RichText::new(&detail).monospace().weak()).truncate())
+            .on_hover_text(&detail);
+    }
+
+    ui.add_space(10.0);
+    ui.horizontal(|ui| {
+        if ui.button("Edit").clicked() {
+            requests.edit = Some(index);
+        }
+        if ui.button("Remove").clicked() {
+            requests.remove = Some(index);
+        }
+    });
+
+    ui.add_space(6.0);
+    ui.weak("Drag it onto another slot to swap them.");
+}
+
+fn draw_empty(ui: &mut egui::Ui, slot: Slot, requests: &mut Requests) {
+    ui.heading("Empty");
+    ui.label("Put something here:");
+    ui.add_space(6.0);
+
+    ui.horizontal_wrapped(|ui| {
+        for (kind, name) in ItemKind::NAMES.iter().enumerate() {
+            if ui.button(*name).clicked() {
+                requests.add = Some((slot, kind));
+            }
+        }
+    });
+}
+
+fn apply(settings: &mut Settings, requests: Requests) {
+    let tab = settings.items_view.tab;
+
+    if let Some((from, to)) = requests.swap {
+        swap_slots(&mut settings.draft.working.items, tab, from, to);
+        settings.items_view.selected = Some(to);
+    }
+    if let Some(index) = requests.remove {
         settings.draft.working.items.remove(index);
     }
-    if let Some(index) = edit {
+    if let Some(index) = requests.edit {
         settings.editor = Some(ItemEditor {
             index: Some(index),
             item: settings.draft.working.items[index].clone(),
         });
         return;
     }
-
-    ui.add_space(12.0);
-    draw_add(settings, ui);
+    if let Some((slot, kind)) = requests.add {
+        let (Some(name), Some(kind)) = (ItemKind::NAMES.get(kind), ItemKind::blank(kind)) else {
+            return;
+        };
+        settings.editor = Some(ItemEditor {
+            index: None,
+            item: Item {
+                name: (*name).to_owned(),
+                icon: None,
+                tab: tab.number(),
+                slot: slot.index(),
+                kind,
+            },
+        });
+    }
 }
 
-fn draw_add(settings: &mut Settings, ui: &mut egui::Ui) {
-    let Some(position) = settings.draft.first_free_position() else {
-        ui.label("Every slot on every tab is taken.");
-        return;
-    };
+/// Where in the item list a slot's item is.
+fn item_at(items: &[Item], tab: Tab, slot: Slot) -> Option<usize> {
+    items
+        .iter()
+        .position(|item| item.tab == tab.number() && item.slot == slot.index())
+}
 
-    ui.horizontal_wrapped(|ui| {
-        ui.label("Add");
-        for (index, name) in ItemKind::NAMES.iter().enumerate() {
-            if !ui.button(*name).clicked() {
-                continue;
-            }
-            let Some(kind) = ItemKind::blank(index) else {
-                continue;
-            };
-            settings.editor = Some(ItemEditor {
-                index: None,
-                item: Item {
-                    name: (*name).to_owned(),
-                    icon: None,
-                    tab: position.tab.number(),
-                    slot: position.slot.index(),
-                    kind,
-                },
-            });
+fn items_on(items: &[Item], tab: Tab) -> usize {
+    items.iter().filter(|item| item.tab == tab.number()).count()
+}
+
+/// Swaps whatever sits in two slots of one tab. Either may be empty, which makes it a
+/// move.
+fn swap_slots(items: &mut [Item], tab: Tab, from: Slot, to: Slot) {
+    for item in items.iter_mut().filter(|item| item.tab == tab.number()) {
+        if item.slot == from.index() {
+            item.slot = to.index();
+        } else if item.slot == to.index() {
+            item.slot = from.index();
         }
-    });
+    }
+}
+
+/// Wraps at both ends, so the arrows never dead-end.
+fn step_tab(tab: Tab, by: isize) -> Tab {
+    let count = Tab::MAX_COUNT as isize;
+    let index = (tab.index() as isize + by).rem_euclid(count) as usize;
+    Tab::from_index(index).unwrap_or(Tab::FIRST)
+}
+
+fn tab_name(settings: &Settings, tab: Tab) -> Option<String> {
+    settings
+        .draft
+        .working
+        .tab(tab)
+        .and_then(|settings| settings.name.clone())
+        .filter(|name| !name.trim().is_empty())
+}
+
+/// One word under a slice's label, since the full type name does not fit.
+fn caption(kind: &ItemKind) -> &'static str {
+    match kind {
+        ItemKind::UnpinnedApp => "unpinned",
+        ItemKind::App { .. } => "app",
+        ItemKind::Script { .. } => "script",
+        ItemKind::Url { .. } => "url",
+        ItemKind::Snippet { .. } => "snippet",
+        ItemKind::Folder { .. } => "folder",
+        ItemKind::Terminal { .. } => "terminal",
+    }
+}
+
+/// The one line that says what the item does, for the details panel.
+fn summary(kind: &ItemKind) -> Option<String> {
+    let text = match kind {
+        ItemKind::UnpinnedApp => return Some("Filled by whatever is running".to_owned()),
+        ItemKind::App { target } => target.clone(),
+        ItemKind::Script { path, .. } | ItemKind::Folder { path } => path.clone(),
+        ItemKind::Url { url, .. } => url.clone(),
+        ItemKind::Snippet { text, .. } => text.lines().next().unwrap_or_default().to_owned(),
+        ItemKind::Terminal {
+            profile, distro, ..
+        } => [profile.as_deref(), distro.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · "),
+    };
+    (!text.trim().is_empty()).then_some(text)
 }
 
 fn draw_editor(settings: &mut Settings, ui: &mut egui::Ui) {
@@ -144,6 +435,12 @@ fn commit(settings: &mut Settings, editor: &ItemEditor) {
         None => settings.draft.working.items.push(editor.item.clone()),
     }
     settings.draft.ensure_tab(editor.item.tab);
+
+    // land on the item where it now sits, which may be a different tab than before
+    if let Some(position) = editor.item.position() {
+        settings.items_view.tab = position.tab;
+        settings.items_view.selected = Some(position.slot);
+    }
 }
 
 /// Fields every type has: the name, the icon, and where it sits.
@@ -324,12 +621,6 @@ fn draw_terminal(
     ui.label("  A Windows path, or a Linux path when a WSL distro is set.");
 }
 
-fn position_text(item: &Item) -> String {
-    let slot = Slot::new(item.slot).map(slot_label).unwrap_or("?");
-
-    format!("{}:{:<3}", item.tab, slot)
-}
-
 /// Says what is stopping Done, rather than leaving it greyed out for no visible reason.
 fn name_problem(item: &Item) -> Option<String> {
     if item.name.trim().is_empty() {
@@ -358,6 +649,98 @@ mod tests {
     #[test]
     fn there_is_no_type_past_the_list() {
         assert!(ItemKind::blank(ItemKind::NAMES.len()).is_none());
+    }
+
+    fn folder(name: &str, tab: usize, slot: usize) -> Item {
+        Item {
+            name: name.to_owned(),
+            icon: None,
+            tab,
+            slot,
+            kind: ItemKind::Folder {
+                path: "C:\\".to_owned(),
+            },
+        }
+    }
+
+    fn slot(index: usize) -> Slot {
+        Slot::new(index).expect("a real slot")
+    }
+
+    fn tab(number: usize) -> Tab {
+        Tab::from_number(number).expect("a real tab")
+    }
+
+    #[test]
+    fn dragging_one_item_onto_another_swaps_them() {
+        let mut items = vec![folder("a", 1, 0), folder("b", 1, 4)];
+
+        swap_slots(&mut items, tab(1), slot(0), slot(4));
+
+        assert_eq!((items[0].slot, items[1].slot), (4, 0));
+    }
+
+    #[test]
+    fn dragging_onto_an_empty_slot_moves_the_item() {
+        let mut items = vec![folder("a", 1, 0)];
+
+        swap_slots(&mut items, tab(1), slot(0), slot(5));
+
+        assert_eq!(items[0].slot, 5);
+    }
+
+    /// The wheel only shows one tab, so a swap on it must leave every other tab alone.
+    #[test]
+    fn a_swap_never_touches_another_tab() {
+        let mut items = vec![folder("a", 1, 0), folder("other", 2, 4)];
+
+        swap_slots(&mut items, tab(1), slot(0), slot(4));
+
+        assert_eq!((items[1].tab, items[1].slot), (2, 4));
+    }
+
+    #[test]
+    fn a_slot_is_found_on_its_own_tab_only() {
+        let items = vec![folder("a", 1, 3), folder("b", 2, 3)];
+
+        assert_eq!(item_at(&items, tab(2), slot(3)), Some(1));
+        assert_eq!(item_at(&items, tab(1), slot(4)), None);
+        assert_eq!(items_on(&items, tab(1)), 1);
+    }
+
+    #[test]
+    fn the_tab_arrows_wrap_at_both_ends() {
+        assert_eq!(step_tab(tab(1), -1), tab(Tab::MAX_COUNT));
+        assert_eq!(step_tab(tab(Tab::MAX_COUNT), 1), tab(1));
+        assert_eq!(step_tab(tab(3), 1), tab(4));
+    }
+
+    #[test]
+    fn a_summary_says_what_the_item_does() {
+        let app = ItemKind::App {
+            target: r"C:\Kiro.lnk".to_owned(),
+        };
+        let snippet = ItemKind::Snippet {
+            text: "first line\nsecond".to_owned(),
+            mode: SnippetMode::Clipboard,
+        };
+
+        assert_eq!(summary(&app).as_deref(), Some(r"C:\Kiro.lnk"));
+        assert_eq!(summary(&snippet).as_deref(), Some("first line"));
+        assert_eq!(
+            summary(&ItemKind::Folder {
+                path: "  ".to_owned()
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn every_type_has_a_caption() {
+        for index in 0..ItemKind::NAMES.len() {
+            let kind = ItemKind::blank(index).expect("every listed type has a blank");
+            assert!(!caption(&kind).is_empty());
+        }
     }
 
     #[test]

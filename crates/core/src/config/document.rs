@@ -108,6 +108,12 @@ impl ConfigDocument {
             quips.push(quip.as_str());
         }
         set_value(table, "empty_quips", quips.into());
+
+        let mut hidden = toml_edit::Array::new();
+        for app in &wheel.hidden_apps {
+            hidden.push(app.as_str());
+        }
+        set_value(table, "hidden_apps", hidden.into());
     }
 
     /// Replaces the hotkey list wholesale, because its entries have no stable identity.

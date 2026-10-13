@@ -57,6 +57,41 @@ pub fn draw(settings: &mut Settings, ui: &mut egui::Ui) {
     ui.separator();
     ui.add_space(8.0);
     draw_quips(ui, &mut wheel.empty_quips);
+
+    ui.add_space(16.0);
+    ui.separator();
+    ui.add_space(8.0);
+    draw_hidden_apps(ui, &mut wheel.hidden_apps);
+}
+
+/// Apps that should never take an unpinned slot, such as a status bar that Windows
+/// reports as an ordinary app.
+fn draw_hidden_apps(ui: &mut egui::Ui, apps: &mut Vec<String>) {
+    ui.label("Hidden apps");
+    ui.label("  Running apps listed here never take an unpinned slot.");
+    ui.label("  Use the exe name, like komorebi-bar.exe. Pinning one still works.");
+    ui.add_space(4.0);
+
+    let mut remove = None;
+    for (index, app) in apps.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(app)
+                    .desired_width(320.0)
+                    .hint_text("something.exe"),
+            );
+            if ui.button("Remove").clicked() {
+                remove = Some(index);
+            }
+        });
+    }
+    if let Some(index) = remove {
+        apps.remove(index);
+    }
+
+    if ui.button("Hide another app").clicked() {
+        apps.push(String::new());
+    }
 }
 
 fn draw_accent(ui: &mut egui::Ui, accent: &mut String) {
