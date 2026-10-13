@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 use kile_wheel_core::config::Config;
 use kile_wheel_platform::icons::IconImage;
 use kile_wheel_platform::monitor::Monitor;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, FindWindowW, HWND_TOPMOST, KillTimer, PostMessageW,
@@ -110,6 +111,15 @@ impl Overlay {
             .resize(size_px as u32, metrics, palette_for(config))
             .context("could not resize the overlay swap chain for the target monitor")?;
 
+        // the window is sized for the furthest a petal can reach, which on a short monitor
+        // runs off its top and bottom; petals are kept to the part you can actually see
+        let origin = POINT {
+            x: centre.x - size_px / 2,
+            y: centre.y - size_px / 2,
+        };
+        self.renderer
+            .set_visible(visible_in_window(monitor.work, origin));
+
         self.centre = centre;
         Ok(())
     }
@@ -118,6 +128,18 @@ impl Overlay {
         self.renderer
             .draw(frame)
             .context("could not draw the wheel")
+    }
+
+    /// Kept for the tests below, which check the screen-to-window conversion.
+    #[cfg(test)]
+    fn visible_for(work: RECT, centre: POINT, size_px: i32) -> D2D_RECT_F {
+        visible_in_window(
+            work,
+            POINT {
+                x: centre.x - size_px / 2,
+                y: centre.y - size_px / 2,
+            },
+        )
     }
 
     /// Which form line a screen point lands on. The point is screen-relative, so it is
@@ -165,6 +187,17 @@ impl Overlay {
     pub fn stop_frame_timer(&self) {
         // SAFETY: killing a timer that is not running just fails.
         let _ = unsafe { KillTimer(Some(self.window), FRAME_TIMER) };
+    }
+}
+
+/// The monitor's work area in window coordinates, given where the window's corner sits on
+/// screen.
+fn visible_in_window(work: RECT, window_origin: POINT) -> D2D_RECT_F {
+    D2D_RECT_F {
+        left: (work.left - window_origin.x) as f32,
+        top: (work.top - window_origin.y) as f32,
+        right: (work.right - window_origin.x) as f32,
+        bottom: (work.bottom - window_origin.y) as f32,
     }
 }
 
@@ -246,4 +279,45 @@ unsafe extern "system" fn window_proc(
 
     // SAFETY: forwards the values Windows gave us to the default handler.
     unsafe { DefWindowProcW(window, message, wparam, lparam) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The case that put petals off screen: a 1920x1200 monitor at 125% with the taskbar
+    /// along the bottom, and a window taller than the monitor.
+    #[test]
+    fn a_window_taller_than_the_monitor_is_trimmed_to_the_work_area() {
+        let work = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1140,
+        };
+        let centre = POINT { x: 960, y: 600 };
+        let size_px = 1690;
+
+        let visible = Overlay::visible_for(work, centre, size_px);
+
+        // the window's top edge is 245 px above the screen, so the screen starts that far in
+        assert_eq!(visible.top, 245.0);
+        // and the taskbar's top edge is 1140 px down the screen
+        assert_eq!(visible.bottom, 245.0 + 1140.0);
+        assert_eq!(visible.left, -(960.0 - 845.0));
+    }
+
+    #[test]
+    fn a_window_that_fits_is_wholly_visible() {
+        let work = RECT {
+            left: 0,
+            top: 0,
+            right: 3840,
+            bottom: 2160,
+        };
+        let visible = Overlay::visible_for(work, POINT { x: 1920, y: 1080 }, 1000);
+
+        assert!(visible.left <= 0.0 && visible.top <= 0.0);
+        assert!(visible.right >= 1000.0 && visible.bottom >= 1000.0);
+    }
 }

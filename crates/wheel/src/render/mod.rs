@@ -157,6 +157,9 @@ pub struct Renderer {
     size_px: u32,
     metrics: Metrics,
     palette: Palette,
+    /// The part of the window that is on screen, in window coordinates. `None` until the
+    /// window has been placed, which means all of it.
+    visible: Option<D2D_RECT_F>,
     /// Held so the composition tree stays alive for as long as the window does.
     _composition: IDCompositionDevice,
     _target: IDCompositionTarget,
@@ -211,6 +214,7 @@ impl Renderer {
             size_px,
             metrics,
             palette,
+            visible: None,
             _composition: composition,
             _target: target,
             _visual: visual,
@@ -219,6 +223,11 @@ impl Renderer {
 
     pub fn metrics(&self) -> Metrics {
         self.metrics
+    }
+
+    /// Records which part of the window is on screen, so a petal is kept inside it.
+    pub fn set_visible(&mut self, visible: D2D_RECT_F) {
+        self.visible = Some(visible);
     }
 
     /// Which form line is under `point`, in window coordinates.
@@ -534,16 +543,8 @@ impl Renderer {
         metrics.widthIncludingTrailingWhitespace
     }
 
-    /// The area a petal may use, which is the window less a hair of margin.
     fn drawable_bounds(&self) -> D2D_RECT_F {
-        let side = self.size_px as f32;
-
-        D2D_RECT_F {
-            left: FORM_EDGE_MARGIN_PX,
-            top: FORM_EDGE_MARGIN_PX,
-            right: side - FORM_EDGE_MARGIN_PX,
-            bottom: side - FORM_EDGE_MARGIN_PX,
-        }
+        drawable_area(self.size_px, self.visible)
     }
 
     fn fill_wedges(&self, frame: &Frame<'_>) {
@@ -947,6 +948,38 @@ impl Renderer {
     }
 }
 
+/// The area a petal may use: the part of the window that is on screen, less a hair of
+/// margin.
+///
+/// The window is sized for the furthest a petal can reach, so on a monitor shorter than
+/// that it hangs off the top and bottom. Clamping to the window alone let a north or
+/// south petal open off screen.
+fn drawable_area(size_px: u32, visible: Option<D2D_RECT_F>) -> D2D_RECT_F {
+    let side = size_px as f32;
+    let window = D2D_RECT_F {
+        left: 0.0,
+        top: 0.0,
+        right: side,
+        bottom: side,
+    };
+    let on_screen = match visible {
+        Some(visible) => D2D_RECT_F {
+            left: window.left.max(visible.left),
+            top: window.top.max(visible.top),
+            right: window.right.min(visible.right),
+            bottom: window.bottom.min(visible.bottom),
+        },
+        None => window,
+    };
+
+    D2D_RECT_F {
+        left: on_screen.left + FORM_EDGE_MARGIN_PX,
+        top: on_screen.top + FORM_EDGE_MARGIN_PX,
+        right: on_screen.right - FORM_EDGE_MARGIN_PX,
+        bottom: on_screen.bottom - FORM_EDGE_MARGIN_PX,
+    }
+}
+
 fn centre_of(size_px: u32) -> Vector2 {
     let half = size_px as f32 / 2.0;
     Vector2 { X: half, Y: half }
@@ -1032,5 +1065,69 @@ fn create_swap_chain(
         let adapter = dxgi_device.GetAdapter()?;
         let factory: IDXGIFactory2 = adapter.GetParent()?;
         factory.CreateSwapChainForComposition(d3d_device, &description, None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn before_the_window_is_placed_the_whole_window_is_usable() {
+        let area = drawable_area(1000, None);
+
+        assert_eq!(area.left, FORM_EDGE_MARGIN_PX);
+        assert_eq!(area.bottom, 1000.0 - FORM_EDGE_MARGIN_PX);
+    }
+
+    /// A window hanging off the top and bottom of the screen only lends its on-screen
+    /// middle to a petal.
+    #[test]
+    fn a_window_hanging_off_the_screen_lends_only_its_visible_part() {
+        let visible = D2D_RECT_F {
+            left: -200.0,
+            top: 245.0,
+            right: 1800.0,
+            bottom: 1385.0,
+        };
+
+        let area = drawable_area(1690, Some(visible));
+
+        assert_eq!(area.top, 245.0 + FORM_EDGE_MARGIN_PX);
+        assert_eq!(area.bottom, 1385.0 - FORM_EDGE_MARGIN_PX);
+        // sideways the window is the tighter limit, so it still wins
+        assert_eq!(area.left, FORM_EDGE_MARGIN_PX);
+        assert_eq!(area.right, 1690.0 - FORM_EDGE_MARGIN_PX);
+    }
+
+    /// The real case end to end: every slice's petal, laid out against the visible part,
+    /// stays on screen.
+    #[test]
+    fn every_petal_stays_on_a_short_screen() {
+        let size_px = 1690;
+        let visible = D2D_RECT_F {
+            left: -115.0,
+            top: 245.0,
+            right: 1805.0,
+            bottom: 1385.0,
+        };
+        let area = drawable_area(size_px, Some(visible));
+        let centre = centre_of(size_px);
+
+        for slot in Slot::all() {
+            for rows in [3, 8, 12] {
+                let petal = Petal::new(centre, 387.5, slot_bearing_rad(slot), rows, 1.0, area);
+                assert!(
+                    petal.panel.top >= visible.top,
+                    "slot {} rows {rows}",
+                    slot.index()
+                );
+                assert!(
+                    petal.panel.bottom <= visible.bottom,
+                    "slot {} rows {rows}",
+                    slot.index()
+                );
+            }
+        }
     }
 }

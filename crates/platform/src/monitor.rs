@@ -21,6 +21,9 @@ pub enum MonitorChoice {
 #[derive(Debug, Clone, Copy)]
 pub struct Monitor {
     pub bounds: RECT,
+    /// The bounds less the taskbar and any other docked bar, which is the part a panel
+    /// can be read in.
+    pub work: RECT,
     pub dpi: u32,
 }
 
@@ -101,13 +104,16 @@ fn from_point(point: POINT, flags: windows::Win32::Graphics::Gdi::MONITOR_FROM_F
 }
 
 fn describe(monitor: HMONITOR) -> Monitor {
+    let (bounds, work) = monitor_rects(monitor);
     Monitor {
-        bounds: monitor_bounds(monitor),
+        bounds,
+        work,
         dpi: monitor_dpi(monitor),
     }
 }
 
-fn monitor_bounds(monitor: HMONITOR) -> RECT {
+/// The whole monitor and its work area.
+fn monitor_rects(monitor: HMONITOR) -> (RECT, RECT) {
     let mut info = MONITORINFO {
         cbSize: size_of::<MONITORINFO>() as u32,
         ..MONITORINFO::default()
@@ -116,9 +122,9 @@ fn monitor_bounds(monitor: HMONITOR) -> RECT {
     // SAFETY: cbSize is set and the pointer targets a live local.
     let ok = unsafe { windows::Win32::Graphics::Gdi::GetMonitorInfoW(monitor, &mut info) };
     if ok.as_bool() {
-        return info.rcMonitor;
+        return (info.rcMonitor, info.rcWork);
     }
-    RECT::default()
+    (RECT::default(), RECT::default())
 }
 
 fn monitor_dpi(monitor: HMONITOR) -> u32 {
