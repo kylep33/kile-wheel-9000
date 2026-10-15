@@ -97,6 +97,16 @@ impl ConfigDocument {
 
         set_value(table, "monitor", monitor_name(wheel.monitor).into());
         set_value(table, "center_cursor", wheel.center_cursor.into());
+        set_value(
+            table,
+            "center_cursor_on_tab_change",
+            wheel.center_cursor_on_tab_change.into(),
+        );
+        set_value(
+            table,
+            "center_cursor_on_sub_wheel",
+            wheel.center_cursor_on_sub_wheel.into(),
+        );
         set_value(table, "animation", animation_name(wheel.animation).into());
         set_value(table, "open_hotkey_closes", wheel.open_hotkey_closes.into());
         set_value(table, "size", f64::from(wheel.size).into());

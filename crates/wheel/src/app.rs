@@ -20,12 +20,12 @@ use kile_wheel_platform::icon_files;
 use kile_wheel_platform::icons::IconCache;
 use kile_wheel_platform::identity::IdentityCache;
 use kile_wheel_platform::installed;
-use kile_wheel_platform::monitor::{self, Monitor, MonitorChoice};
+use kile_wheel_platform::monitor::{self, MonitorChoice};
 use kile_wheel_platform::paths::expand;
 use kile_wheel_platform::watcher::{Watcher, WindowEvent};
 use kile_wheel_platform::{activate, dialog, launch, shell, snippet};
 use tracing::{info, warn};
-use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
     DestroyWindow, DispatchMessageW, GetMessageW, MSG, SetCursorPos, WM_TIMER,
 };
@@ -635,7 +635,9 @@ impl App {
         }
         self.redraw = true;
 
+        // a drag carries its item across, so the cursor stays where it is
         let Some(from) = dragged_from else {
+            self.centre_cursor_if(self.config.wheel.center_cursor_on_tab_change);
             return;
         };
         let moved = self.move_item(from, Position::new(self.state.tab(), from.slot));
@@ -860,9 +862,7 @@ impl App {
         self.overlay.show();
         self.redraw = false;
 
-        if self.config.wheel.center_cursor {
-            centre_cursor(monitor);
-        }
+        self.centre_cursor_if(self.config.wheel.center_cursor);
 
         if let Some(seen_at) = hotkey_seen_at {
             report_open_latency(seen_at.elapsed());
@@ -888,10 +888,24 @@ impl App {
     }
 
     fn go_back(&mut self) {
+        let leaving_sub_wheel = self.state.in_sub_wheel();
+
         match self.state.back() {
             Back::WentUp => self.redraw = true,
             Back::Closed => self.close(),
         }
+        self.centre_cursor_if(leaving_sub_wheel && self.config.wheel.center_cursor_on_sub_wheel);
+    }
+
+    fn centre_cursor_if(&self, wanted: bool) {
+        if !wanted {
+            return;
+        }
+        let centre = self.overlay.centre();
+
+        // SAFETY: moves the cursor only. The move it generates is flagged injected, so our
+        // own mouse hook ignores it and the selection does not jump.
+        let _ = unsafe { SetCursorPos(centre.x, centre.y) };
     }
 
     /// Uploads any icon the GPU has not seen yet. Extraction is cached, so this is a
@@ -1169,6 +1183,7 @@ impl App {
         if entry.windows.len() > 1 {
             let sub_wheel = SubWheel::new(self.window_choices(entry), entry.new_window());
             self.state.enter_sub_wheel(sub_wheel);
+            self.centre_cursor_if(self.config.wheel.center_cursor_on_sub_wheel);
             self.redraw = true;
             return Ok(());
         }
@@ -1379,14 +1394,6 @@ fn choice(config: &Config) -> MonitorChoice {
         MonitorTarget::Cursor => MonitorChoice::UnderCursor,
         MonitorTarget::Primary => MonitorChoice::Primary,
     }
-}
-
-fn centre_cursor(monitor: Monitor) {
-    let centre: POINT = monitor.center();
-
-    // SAFETY: moves the cursor only. The move it generates is flagged injected, so our
-    // own mouse hook ignores it and the selection does not jump.
-    let _ = unsafe { SetCursorPos(centre.x, centre.y) };
 }
 
 /// The open budget is the whole point of the design, so every open is measured and a miss

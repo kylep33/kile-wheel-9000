@@ -95,6 +95,8 @@ impl Default for General {
 pub struct WheelSettings {
     pub monitor: MonitorTarget,
     pub center_cursor: bool,
+    pub center_cursor_on_tab_change: bool,
+    pub center_cursor_on_sub_wheel: bool,
     pub animation: AnimationSpeed,
     pub open_hotkey_closes: bool,
     pub size: f32,
@@ -111,6 +113,8 @@ impl Default for WheelSettings {
         Self {
             monitor: MonitorTarget::default(),
             center_cursor: true,
+            center_cursor_on_tab_change: true,
+            center_cursor_on_sub_wheel: true,
             animation: AnimationSpeed::default(),
             open_hotkey_closes: false,
             size: 1.0,

@@ -1,6 +1,6 @@
 //! Wheel: where it opens, how big, how it looks.
 
-use kile_wheel_core::config::{AnimationSpeed, MonitorTarget, Rgb};
+use kile_wheel_core::config::{AnimationSpeed, MonitorTarget, Rgb, WheelSettings};
 
 use crate::ui::Settings;
 
@@ -25,10 +25,6 @@ pub fn draw(settings: &mut Settings, ui: &mut egui::Ui) {
             MonitorTarget::Primary,
             "Primary monitor",
         );
-    });
-
-    super::row(ui, "Center the cursor on open", |ui| {
-        ui.checkbox(&mut wheel.center_cursor, "");
     });
 
     super::row(ui, "Open hotkey also closes", |ui| {
@@ -56,12 +52,33 @@ pub fn draw(settings: &mut Settings, ui: &mut egui::Ui) {
     ui.add_space(16.0);
     ui.separator();
     ui.add_space(8.0);
+    draw_mouse_control(ui, wheel);
+
+    ui.add_space(16.0);
+    ui.separator();
+    ui.add_space(8.0);
     draw_quips(ui, &mut wheel.empty_quips);
 
     ui.add_space(16.0);
     ui.separator();
     ui.add_space(8.0);
     draw_hidden_apps(ui, &mut wheel.hidden_apps);
+}
+
+fn draw_mouse_control(ui: &mut egui::Ui, wheel: &mut WheelSettings) {
+    ui.label("Mouse control");
+    ui.add_space(4.0);
+
+    super::row(ui, "Snap to center on open", |ui| {
+        ui.checkbox(&mut wheel.center_cursor, "");
+    });
+    super::row(ui, "Snap to center on tab change", |ui| {
+        ui.checkbox(&mut wheel.center_cursor_on_tab_change, "");
+    });
+    super::row(ui, "Snap to center on sub-wheel", |ui| {
+        ui.checkbox(&mut wheel.center_cursor_on_sub_wheel, "");
+    });
+    ui.label("  Sub-wheel covers going into a window picker and backing out of it.");
 }
 
 /// Apps that should never take an unpinned slot, such as a status bar that Windows

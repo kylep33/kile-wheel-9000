@@ -32,7 +32,10 @@ action = "toggle"
 [wheel]
 # "cursor" opens on the monitor under the pointer, "primary" always on the main one
 monitor = "cursor"
+# snap the cursor to the middle on open, on a tab change, and in and out of a sub-wheel
 center_cursor = true
+center_cursor_on_tab_change = true
+center_cursor_on_sub_wheel = true
 # "normal", "fast" or "off"
 animation = "fast"
 # whether the open hotkey also closes an already open wheel

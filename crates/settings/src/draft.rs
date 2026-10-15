@@ -157,6 +157,8 @@ fn same_general(left: &config::General, right: &config::General) -> bool {
 fn same_wheel(left: &config::WheelSettings, right: &config::WheelSettings) -> bool {
     left.monitor == right.monitor
         && left.center_cursor == right.center_cursor
+        && left.center_cursor_on_tab_change == right.center_cursor_on_tab_change
+        && left.center_cursor_on_sub_wheel == right.center_cursor_on_sub_wheel
         && left.animation == right.animation
         && left.open_hotkey_closes == right.open_hotkey_closes
         && left.size.to_bits() == right.size.to_bits()
