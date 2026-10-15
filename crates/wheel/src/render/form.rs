@@ -96,6 +96,21 @@ pub fn inset(rect: D2D_RECT_F, by_px: f32) -> D2D_RECT_F {
     }
 }
 
+/// The largest square that fits inside `rect` once inset, centred, so an icon keeps its
+/// shape in a tile that is not quite square.
+pub fn square_in(rect: D2D_RECT_F, inset_px: f32) -> D2D_RECT_F {
+    let side = ((rect.right - rect.left).min(rect.bottom - rect.top) - inset_px * 2.0).max(0.0);
+    let centre_x = (rect.left + rect.right) / 2.0;
+    let centre_y = (rect.top + rect.bottom) / 2.0;
+
+    D2D_RECT_F {
+        left: centre_x - side / 2.0,
+        top: centre_y - side / 2.0,
+        right: centre_x + side / 2.0,
+        bottom: centre_y + side / 2.0,
+    }
+}
+
 fn arc(
     to: Vector2,
     radius_px: f32,
@@ -165,6 +180,15 @@ mod tests {
     #[test]
     fn a_box_narrower_than_its_margin_scrolls_the_caret_to_the_edge() {
         assert_eq!(caret_scroll(50.0, 5.0, 10.0), 50.0);
+    }
+
+    #[test]
+    fn a_square_fits_the_short_side_and_stays_centred() {
+        let square = square_in(ROW, 2.0);
+
+        assert_eq!(square.right - square.left, 16.0);
+        assert_eq!(square.bottom - square.top, 16.0);
+        assert_eq!((square.left + square.right) / 2.0, 200.0);
     }
 
     #[test]

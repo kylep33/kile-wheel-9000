@@ -9,29 +9,32 @@ use kile_wheel_core::binding::{Action, KeyCode, Modifiers, MouseButton, keys};
 use kile_wheel_core::config::{Config, ConfigDocument, MonitorTarget};
 use kile_wheel_core::item::{AppCandidate, Item, ItemKind, Position};
 use kile_wheel_core::layout::SlotMemory;
-use kile_wheel_core::names::{ConfigPaths, SETTINGS_EXE};
+use kile_wheel_core::names::{ConfigPaths, DISPLAY_NAME, SETTINGS_EXE};
 use kile_wheel_core::select::{self, Offset, held};
 use kile_wheel_core::slot::{Slot, Tab};
 use kile_wheel_platform::apps::{AppKey, WindowModel};
 use kile_wheel_platform::clipboard;
 use kile_wheel_platform::config_watch::ConfigWatcher;
 use kile_wheel_platform::hooks::{self, HookThread, InputEvent, SharedInput};
+use kile_wheel_platform::icon_files;
 use kile_wheel_platform::icons::IconCache;
 use kile_wheel_platform::identity::IdentityCache;
 use kile_wheel_platform::installed;
 use kile_wheel_platform::monitor::{self, Monitor, MonitorChoice};
+use kile_wheel_platform::paths::expand;
 use kile_wheel_platform::watcher::{Watcher, WindowEvent};
-use kile_wheel_platform::{activate, launch, shell, snippet};
+use kile_wheel_platform::{activate, dialog, launch, shell, snippet};
 use tracing::{info, warn};
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::UI::WindowsAndMessaging::{
     DestroyWindow, DispatchMessageW, GetMessageW, MSG, SetCursorPos, WM_TIMER,
 };
 
+use crate::form::grid::Tile;
 use crate::form::{Form, Outcome};
 use crate::keyboard::printable;
 use crate::overlay::{self, Overlay};
-use crate::render::{FormView, Frame, HubView, SlotView};
+use crate::render::{FormView, Frame, GridView, HubView, SlotView};
 use crate::slots::{self, Layout, NewWindow, SlotEntry, SlotTarget};
 use crate::state::{Back, Mode, SubChoice, SubWheel, WheelState, WindowChoice};
 use crate::theme;
@@ -42,6 +45,9 @@ const OPEN_BUDGET: Duration = Duration::from_millis(50);
 
 /// What the notification area shows on hover.
 const TRAY_TOOLTIP: &str = "kile-wheel-9000";
+
+/// Asked before Quit, because losing the tray icon is how you lose the way back.
+const QUIT_PROMPT: &str = "Quit, and take the tray icon with it?\n\nThe hotkey stops working until you start it again.\n\nPick Disable instead to turn the wheel off and keep the icon.";
 
 /// Hold this long on a slot or the cog to toggle edit mode.
 const EDIT_HOLD_MS: u32 = 400;
@@ -83,7 +89,9 @@ pub struct App {
     form: Option<Form>,
     /// Held so the icon is removed on the way out. Dropped after the overlay, which is
     /// what its menu posts to.
-    _tray: Option<Tray>,
+    tray: Option<Tray>,
+    /// Off means the hotkeys are ignored, set from the tray menu.
+    enabled: bool,
     redraw: bool,
 }
 
@@ -149,7 +157,8 @@ impl App {
             config,
             press: None,
             form: None,
-            _tray: tray,
+            tray,
+            enabled: true,
             redraw: false,
         };
 
@@ -160,6 +169,7 @@ impl App {
     fn build_layout(&mut self) -> Layout {
         Layout::build(
             &self.config,
+            &self.paths,
             &self.model,
             &mut self.memory,
             &mut self.identities,
@@ -238,15 +248,50 @@ impl App {
                 Ok(()) => info!("reloaded the config"),
                 Err(error) => warn!("keeping the last good config: {error:#}"),
             },
-            // the overlay's WM_DESTROY is what posts WM_QUIT, so the loop ends cleanly and
-            // the tray icon is removed on the way out
-            tray::Command::Quit => self.quit(),
+            tray::Command::ToggleEnabled => self.set_enabled(!self.enabled),
+            tray::Command::Quit => self.confirm_quit(),
         }
+    }
+
+    /// Quit takes the tray icon with it, so it asks first. Disable is the way back.
+    fn confirm_quit(&mut self) {
+        if !dialog::confirm(DISPLAY_NAME, QUIT_PROMPT) {
+            return;
+        }
+        self.quit();
+    }
+
+    /// Off suppresses the hotkeys rather than removing the hooks: the hooks deliver every
+    /// key, including the ones that close the wheel, and they install once per process.
+    fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        info!(enabled, "wheel toggled from the tray");
+
+        if !enabled {
+            self.close();
+        }
+        self.apply_suppression();
+
+        if let Some(tray) = &self.tray {
+            tray.set_enabled(enabled);
+        }
+    }
+
+    /// The tray toggle and the fullscreen check share one flag, so both are folded in here
+    /// rather than one overwriting the other.
+    fn apply_suppression(&self) {
+        let fullscreen =
+            self.config.general.disable_in_fullscreen && monitor::foreground_is_fullscreen();
+
+        self.shared
+            .set_hotkeys_suppressed(!self.enabled || fullscreen);
     }
 
     fn quit(&mut self) {
         self.close();
 
+        // the overlay's WM_DESTROY posts WM_QUIT, so the loop ends cleanly and the tray
+        // icon is removed on the way out
         // SAFETY: destroys our own window, which posts WM_QUIT from its procedure.
         let _ = unsafe { DestroyWindow(self.overlay.window()) };
     }
@@ -280,11 +325,7 @@ impl App {
     /// cheap enough that Windows never tears it down.
     fn on_focus_changed(&mut self, window: HWND) {
         self.model.set_focused(window);
-
-        if self.config.general.disable_in_fullscreen {
-            self.shared
-                .set_hotkeys_suppressed(monitor::foreground_is_fullscreen());
-        }
+        self.apply_suppression();
     }
 
     fn absorb_input(&mut self) {
@@ -296,6 +337,7 @@ impl App {
         }
 
         self.redraw = false;
+        self.load_grid_icons();
         let drawn = self.draw();
         log_failure(drawn);
         self.drive_animation();
@@ -322,7 +364,20 @@ impl App {
                 pressed: true,
             } => self.launch_new_instance(),
             InputEvent::MouseButton { .. } => {}
+            InputEvent::Scrolled { delta } => self.handle_scroll(delta),
         }
+    }
+
+    /// Only the icon grid scrolls. A wheel notch is one grid row, and a touchpad's smaller
+    /// steps still move it, rather than needing a full notch's worth to add up.
+    fn handle_scroll(&mut self, delta: i16) {
+        let Some(form) = &mut self.form else {
+            return;
+        };
+        // positive is away from you, which reads as scrolling up
+        let rows = -isize::from(delta.signum());
+        let outcome = form.scroll(rows);
+        self.apply_form_outcome(outcome);
     }
 
     fn handle_hotkey(&mut self, action: Action, seen_at: Instant) {
@@ -343,6 +398,13 @@ impl App {
         // and the hook ever disagree about whether the wheel is up, and the hook is what
         // decides whether your keys reach anything.
         if code == keys::ESC {
+            // out of the icon grid first, so Esc there does not throw away the whole form
+            if let Some(form) = &mut self.form
+                && form.close_grid()
+            {
+                self.redraw = true;
+                return;
+            }
             match self.form.is_some() {
                 true => self.close_form(),
                 false => self.close(),
@@ -404,7 +466,8 @@ impl App {
     /// a keypress can never drift on what Save or Delete means.
     fn handle_form_click(&mut self, x: i32, y: i32) {
         let lines = self.form_lines();
-        let Some(view) = self.form_view(&lines) else {
+        let grid = self.form_grid();
+        let Some(view) = self.form_view(&lines, grid.as_ref()) else {
             return;
         };
         let Some(index) = self.overlay.form_row_at(&view, x, y) else {
@@ -449,14 +512,15 @@ impl App {
         };
         let tab = self.state.tab();
 
-        self.form = Some(match self.layout.get(tab, slot) {
+        let form = match self.layout.get(tab, slot) {
             Some(entry) => match &entry.target {
                 SlotTarget::Pinned(item) => Form::editing(tab, slot, item),
                 // a running app or an empty unpinned slot is still an unpinned slot entry
                 _ => Form::editing(tab, slot, &unpinned_item(tab, slot)),
             },
             None => Form::picking(tab, slot, self.app_candidates()),
-        });
+        };
+        self.form = Some(form.with_icon_files(self.icon_files()));
         self.redraw = true;
         self.drive_animation();
     }
@@ -856,21 +920,11 @@ impl App {
                     continue;
                 };
                 if let Some(source) = &entry.icon_source {
-                    sources.push(self.resolve_icon(source));
+                    sources.push(source.clone());
                 }
             }
         }
         sources
-    }
-
-    /// A configured icon path is relative to the config folder; an extracted one is
-    /// already absolute.
-    fn resolve_icon(&self, source: &str) -> String {
-        let path = std::path::Path::new(source);
-        if path.is_absolute() {
-            return source.to_owned();
-        }
-        self.paths.resolve_icon(path).to_string_lossy().into_owned()
     }
 
     fn draw(&self) -> Result<()> {
@@ -885,7 +939,11 @@ impl App {
         self.form.as_ref().map(Form::lines).unwrap_or_default()
     }
 
-    fn form_view<'a>(&'a self, lines: &'a [crate::form::Line]) -> Option<FormView<'a>> {
+    fn form_view<'a>(
+        &'a self,
+        lines: &'a [crate::form::Line],
+        grid: Option<&'a GridView>,
+    ) -> Option<FormView<'a>> {
         let form = self.form.as_ref()?;
 
         Some(FormView {
@@ -893,11 +951,68 @@ impl App {
             title: form.title(),
             lines,
             progress: form.progress(self.config.wheel.animation.duration_ms()),
+            grid,
         })
+    }
+
+    /// The icon grid's visible page with every tile turned into an icon key.
+    fn form_grid(&self) -> Option<GridView> {
+        let form = self.form.as_ref()?;
+        let grid = form.grid()?;
+
+        Some(GridView {
+            tiles: grid
+                .visible()
+                .map(|tile| self.tile_key(form, tile))
+                .collect(),
+            highlighted: grid.highlighted_in_view(),
+            caption: grid.caption(),
+        })
+    }
+
+    /// Keyed by the resolved path, the same as a slot's icon, so one upload serves both.
+    fn tile_key(&self, form: &Form, tile: Tile<'_>) -> Option<String> {
+        match tile {
+            Tile::OwnIcon => form.own_icon_source().map(|source| expand(&source)),
+            Tile::File(file) => Some(
+                icon_files::resolve(file, self.paths.root())
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        }
+    }
+
+    /// Uploads the visible page only, so opening the grid costs one page of icons rather
+    /// than the whole folder.
+    fn load_grid_icons(&mut self) {
+        let Some(grid) = self.form_grid() else {
+            return;
+        };
+        let wanted = self.overlay.metrics().icon_size_px.ceil() as u32;
+
+        for key in grid.tiles.into_iter().flatten() {
+            if self.overlay.has_icon(&key) {
+                continue;
+            }
+            let Some(image) = self.icons.get(&key, wanted) else {
+                continue;
+            };
+            let uploaded = self.overlay.upload_icon(&key, image);
+            log_failure(uploaded.context("could not upload an icon to the GPU"));
+        }
+    }
+
+    /// The icons folder as the config stores paths, for the grid to offer.
+    fn icon_files(&self) -> Vec<String> {
+        icon_files::scan(&self.paths.icons_dir())
+            .iter()
+            .map(|path| icon_files::relative_to(path, self.paths.root()))
+            .collect()
     }
 
     fn draw_wheel(&self) -> Result<()> {
         let lines = self.form_lines();
+        let grid = self.form_grid();
         let tab = self.state.tab();
         let entries: Vec<Option<&SlotEntry>> =
             Slot::all().map(|slot| self.layout.get(tab, slot)).collect();
@@ -948,7 +1063,7 @@ impl App {
             edit_mode: self.state.edit_mode(),
             dragging: self.state.dragging(),
             overflow: self.layout.overflow(),
-            form: self.form_view(&lines),
+            form: self.form_view(&lines, grid.as_ref()),
         })
     }
 
@@ -1152,6 +1267,7 @@ impl App {
 
         self.shared.replace_bindings(reloaded.binding_table()?);
         self.config = reloaded;
+        self.apply_suppression();
         // a shortcut may have been re-pointed, so resolve every target again
         self.identities.clear();
         self.layout = self.build_layout();

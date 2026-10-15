@@ -27,7 +27,7 @@ pub fn draw(settings: &mut Settings, ui: &mut egui::Ui) {
 
             super::optional_text(ui, "Name", &mut tab.name);
             let owner = format!("tab {}", tab.index);
-            super::icon_field(ui, picker, &icons_dir, &root, &owner, &mut tab.icon);
+            super::icon_field(ui, picker, &icons_dir, &root, &owner, None, &mut tab.icon);
         });
         ui.add_space(8.0);
     }

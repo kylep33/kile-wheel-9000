@@ -23,6 +23,7 @@ pub enum RowStep {
     Save,
     Delete,
     Cancel,
+    PickIcon,
 }
 
 /// What a line shows to the right of its label.
@@ -55,9 +56,11 @@ pub enum Action {
     Save,
     Delete,
     Cancel,
+    PickIcon,
 }
 
 impl Action {
+    /// The buttons at the foot of every form. Pick icon sits with the icon field instead.
     const ALL: [Self; 3] = [Self::Save, Self::Delete, Self::Cancel];
 
     fn label(self) -> &'static str {
@@ -65,6 +68,7 @@ impl Action {
             Self::Save => "Save",
             Self::Delete => "Delete",
             Self::Cancel => "Cancel",
+            Self::PickIcon => "Pick icon",
         }
     }
 
@@ -76,6 +80,7 @@ impl Action {
             Self::Save => RowStep::Save,
             Self::Delete => RowStep::Delete,
             Self::Cancel => RowStep::Cancel,
+            Self::PickIcon => RowStep::PickIcon,
         }
     }
 }
@@ -268,6 +273,7 @@ pub fn build(item: &Item) -> Vec<Row> {
 
     if !item.kind.is_unpinned() {
         rows.push(Row::optional(ICON, item.icon.as_ref()));
+        rows.push(Row::Action(Action::PickIcon));
     }
     rows.extend(Action::ALL.map(Row::Action));
     rows
@@ -325,6 +331,15 @@ pub fn icon_of(rows: &[Row]) -> Option<String> {
     non_empty(field(rows, ICON))
 }
 
+/// What the grid picked goes into the field, where it can still be edited by hand.
+pub fn set_icon(rows: &mut [Row], icon: Option<&str>) {
+    for row in rows {
+        if let Row::Text { label: ICON, value } = row {
+            *value = TextValue::new(icon.unwrap_or_default());
+        }
+    }
+}
+
 /// Reads the filled lines back out as a name and a kind.
 ///
 /// `None` when the name is blank, because a slot with no name has nothing to show.
@@ -333,8 +348,12 @@ pub fn collect(kind: &ItemKind, rows: &[Row]) -> Option<(String, ItemKind)> {
     if name.trim().is_empty() {
         return None;
     }
+    Some((name, rebuild(kind, rows)))
+}
 
-    let rebuilt = match kind {
+/// The kind as the lines currently describe it, name or not.
+pub fn rebuild(kind: &ItemKind, rows: &[Row]) -> ItemKind {
+    match kind {
         ItemKind::UnpinnedApp => ItemKind::UnpinnedApp,
         ItemKind::App { .. } => ItemKind::App {
             target: field(rows, "Target").unwrap_or_default(),
@@ -366,9 +385,7 @@ pub fn collect(kind: &ItemKind, rows: &[Row]) -> Option<(String, ItemKind)> {
             distro: non_empty(field(rows, "WSL distro")),
             cwd: non_empty(field(rows, "Start in")),
         },
-    };
-
-    Some((name, rebuilt))
+    }
 }
 
 fn field(rows: &[Row], label: &str) -> Option<String> {

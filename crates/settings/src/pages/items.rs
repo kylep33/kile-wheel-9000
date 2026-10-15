@@ -6,6 +6,7 @@
 
 use kile_wheel_core::item::{Item, ItemKind, SCRIPT_PRESETS, SnippetMode};
 use kile_wheel_core::slot::{Slot, Tab};
+use kile_wheel_platform::paths::expand;
 
 use super::mini_wheel::{self, DragState, Palette, SliceView, WheelSpec};
 use crate::draft::slot_label;
@@ -473,12 +474,14 @@ fn draw_common(ui: &mut egui::Ui, item: &mut Item, settings: &mut Settings) {
 
     let icons_dir = settings.draft.icons_dir();
     let root = settings.draft.config_root().to_path_buf();
+    let own_icon = item.kind.icon_source().map(expand);
     super::icon_field(
         ui,
         &mut settings.icon_picker,
         &icons_dir,
         &root,
         "item",
+        own_icon.as_deref(),
         &mut item.icon,
     );
 }

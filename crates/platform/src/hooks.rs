@@ -64,6 +64,10 @@ pub enum InputEvent {
         button: MouseButton,
         pressed: bool,
     },
+    /// The vertical scroll wheel. Positive is away from you, as win32 reports it.
+    Scrolled {
+        delta: i16,
+    },
 }
 
 /// State the hook callbacks read and the main thread writes.
@@ -384,6 +388,11 @@ unsafe fn mouse_swallows(code: i32, wparam: WPARAM, lparam: LPARAM) -> bool {
 
     // scrolling into the app underneath an open wheel is never what was meant
     if matches!(message, WM_MOUSEWHEEL | WM_MOUSEHWHEEL) {
+        if message == WM_MOUSEWHEEL && shared.is_wheel_open() {
+            shared.emit(InputEvent::Scrolled {
+                delta: high_word(info.mouseData) as i16,
+            });
+        }
         return shared.is_wheel_open();
     }
 
@@ -415,12 +424,17 @@ fn decode_button(message: u32, info: MSLLHOOKSTRUCT) -> Option<(MouseButton, boo
 
 /// Which side button it was lives in the high word of `mouseData`.
 fn side_button(info: MSLLHOOKSTRUCT) -> MouseButton {
-    const HIGH_WORD_SHIFT: u32 = u32::BITS / 2;
-
-    match (info.mouseData >> HIGH_WORD_SHIFT) as u16 == XBUTTON1 {
+    match high_word(info.mouseData) == XBUTTON1 {
         true => MouseButton::X1,
         false => MouseButton::X2,
     }
+}
+
+/// Both the side button and the scroll amount ride in the high word of `mouseData`.
+fn high_word(mouse_data: u32) -> u16 {
+    const HIGH_WORD_SHIFT: u32 = u32::BITS / 2;
+
+    (mouse_data >> HIGH_WORD_SHIFT) as u16
 }
 
 /// Shared press path for keys and buttons. Reports whether to swallow.

@@ -1,4 +1,0 @@
-# keep checkouts byte-identical regardless of local autocrlf
-* text=auto eol=lf
-*.png binary
-*.ico binary

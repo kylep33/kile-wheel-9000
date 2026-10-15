@@ -15,8 +15,10 @@ pub use items::{ItemEditor, ItemsView};
 use crate::ui::Settings;
 
 const LABEL_WIDTH_PX: f32 = 180.0;
-const BROWSE_WIDTH_PX: f32 = 90.0;
+/// Kept free beside a path field for the button that fills it.
+const BUTTON_ROOM_PX: f32 = 90.0;
 const MIN_FIELD_WIDTH_PX: f32 = 120.0;
+const PREVIEW_PX: f32 = 28.0;
 
 /// Section order, which is also the sidebar order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,10 +111,10 @@ pub fn path_label(ui: &mut egui::Ui, path: &std::path::Path) {
         .on_hover_text(text.as_ref());
 }
 
-/// Leaves room for the Browse button, so a long path clips inside the field instead of
+/// Leaves room for the button beside it, so a long path clips inside the field instead of
 /// pushing the button off the window.
 fn field_width_px(ui: &egui::Ui) -> f32 {
-    (ui.available_width() - BROWSE_WIDTH_PX).max(MIN_FIELD_WIDTH_PX)
+    (ui.available_width() - BUTTON_ROOM_PX).max(MIN_FIELD_WIDTH_PX)
 }
 
 /// Keeps an optional string and a text field in step: blank means unset.
@@ -158,57 +160,41 @@ pub fn optional_choice(
     *value = Some(text).filter(|text| !text.trim().is_empty());
 }
 
-/// An icon field: a preview, a picker over the icons folder, Browse for anything outside
-/// it, and the path itself for typing.
+/// An icon field: a preview, the path for typing, and Pick icon for the icons folder.
 ///
 /// `owner` names the field, so with several on one page the picker fills the one that
-/// opened it. Blank means the target's own icon.
+/// opened it. Blank means `own_icon`, the icon Windows has for the target.
 pub fn icon_field(
     ui: &mut egui::Ui,
     picker: &mut IconPicker,
     icons_dir: &std::path::Path,
     config_root: &std::path::Path,
     owner: &str,
+    own_icon: Option<&str>,
     icon: &mut Option<String>,
 ) {
     let mut text = icon.clone().unwrap_or_default();
-    let preview = picker.preview(ui.ctx(), &text, config_root);
+    let shown = match text.trim().is_empty() {
+        true => own_icon.unwrap_or_default(),
+        false => text.as_str(),
+    };
+    let preview = picker.preview(ui.ctx(), shown, config_root);
 
     row(ui, "Icon", |ui| {
+        let size = egui::Vec2::splat(PREVIEW_PX);
         match &preview {
-            Some(texture) => {
-                ui.add(
-                    egui::Image::from_texture(texture).fit_to_exact_size(egui::Vec2::splat(24.0)),
-                );
-            }
-            None => {
-                ui.weak("default");
-            }
-        }
-        if ui.button("Choose…").clicked() {
-            picker.open(icons_dir, owner);
-        }
-        if ui.button("Browse").clicked()
-            && let Some(path) = rfd::FileDialog::new()
-                .set_directory(icons_dir)
-                .add_filter(
-                    "Images",
-                    &["png", "jpg", "jpeg", "bmp", "ico", "gif", "webp"],
-                )
-                .pick_file()
-        {
-            text = icon_picker::relative_to(&path, config_root);
-        }
-        if !text.is_empty() && ui.button("Clear").clicked() {
-            text.clear();
-        }
-    });
-    row(ui, "", |ui| {
+            Some(texture) => ui.add(egui::Image::from_texture(texture).fit_to_exact_size(size)),
+            None => ui.add_sized(size, egui::Label::new(egui::RichText::new("none").weak())),
+        };
+
         ui.add(
             egui::TextEdit::singleline(&mut text)
-                .hint_text("blank uses the target's own icon")
-                .desired_width(f32::INFINITY),
+                .hint_text("blank uses the app's own icon")
+                .desired_width(field_width_px(ui)),
         );
+        if ui.button("Pick icon").clicked() {
+            picker.open(icons_dir, owner, &text);
+        }
     });
 
     match picker.show(ui.ctx(), config_root, owner) {

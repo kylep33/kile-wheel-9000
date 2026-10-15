@@ -4,12 +4,15 @@
 //! keystrokes, because the hook swallows everything while the wheel is up, and waiting on
 //! one would block the message loop with input captured.
 
+pub mod grid;
 mod petal;
 mod rows;
 mod text;
 
 pub use petal::{PETAL_MAX_REACH_RATIO, Petal};
 pub use rows::{Line, RowValue};
+
+use grid::{GridStep, IconGrid};
 
 use kile_wheel_core::binding::{KeyCode, Modifiers, keys};
 use kile_wheel_core::item::{AppCandidate, Item, ItemKind};
@@ -68,6 +71,10 @@ pub struct Form {
     /// Apps the picker can offer. Gathered by the caller, which is the only part that
     /// can reach the shell.
     candidates: Vec<AppCandidate>,
+    /// The icons folder, as config paths. Gathered by the caller, like the candidates.
+    icon_files: Vec<String>,
+    /// Open over the fields while an icon is being picked.
+    grid: Option<IconGrid>,
     opened: Animation,
 }
 
@@ -80,6 +87,8 @@ impl Form {
             stage: Stage::PickType { highlighted: 0 },
             occupied: false,
             candidates,
+            icon_files: Vec::new(),
+            grid: None,
             opened: Animation::started(),
         }
     }
@@ -96,8 +105,43 @@ impl Form {
             },
             occupied: true,
             candidates: Vec::new(),
+            icon_files: Vec::new(),
+            grid: None,
             opened: Animation::started(),
         }
+    }
+
+    /// What Pick icon offers. Without it the grid only holds the app's own icon.
+    pub fn with_icon_files(mut self, files: Vec<String>) -> Self {
+        self.icon_files = files;
+        self
+    }
+
+    pub fn grid(&self) -> Option<&IconGrid> {
+        self.grid.as_ref()
+    }
+
+    /// Backs out of the grid to the fields, leaving the icon as it was.
+    pub fn close_grid(&mut self) -> bool {
+        self.grid.take().is_some()
+    }
+
+    /// Scrolls the grid by whole rows. Nothing else in the form scrolls.
+    pub fn scroll(&mut self, rows: isize) -> Outcome {
+        let Some(grid) = &mut self.grid else {
+            return Outcome::Ignored;
+        };
+        grid.scroll(rows);
+        Outcome::Redraw
+    }
+
+    /// Where the app's own icon comes from as the fields stand, so the grid's first tile
+    /// follows a target being edited.
+    pub fn own_icon_source(&self) -> Option<String> {
+        let Stage::Fill { kind, rows, .. } = &self.stage else {
+            return None;
+        };
+        rows::rebuild(kind, rows).icon_source().map(str::to_owned)
     }
 
     pub fn tab(&self) -> Tab {
@@ -123,6 +167,9 @@ impl Form {
     }
 
     pub fn title(&self) -> &'static str {
+        if self.grid.is_some() {
+            return "Pick an icon";
+        }
         match &self.stage {
             Stage::PickType { .. } => "What goes here?",
             Stage::PickApp { .. } => "Which app?",
@@ -154,12 +201,18 @@ impl Form {
             .chain(std::iter::once(OTHER_APP.to_owned()))
     }
 
-    /// Acts on a click that landed on line `index`.
+    /// Acts on a click that landed on line `index`, or on visible tile `index` while the
+    /// grid is open.
     ///
     /// A click is decisive rather than just a focus move: on the picker it chooses the
     /// type, and on an action line it runs the action. Clicking a field only focuses it,
     /// which is all a field can do without a caret position to aim at.
     pub fn click(&mut self, index: usize) -> Outcome {
+        if let Some(grid) = &mut self.grid {
+            let step = grid.click(index);
+            return self.apply_grid(step);
+        }
+
         match &mut self.stage {
             Stage::PickType { highlighted } => match index < ItemKind::NAMES.len() {
                 true => {
@@ -194,6 +247,35 @@ impl Form {
             Action::Save => self.save(),
             Action::Delete => Outcome::Delete,
             Action::Cancel => Outcome::Cancel,
+            Action::PickIcon => self.open_grid(),
+        }
+    }
+
+    fn open_grid(&mut self) -> Outcome {
+        let Stage::Fill { rows, .. } = &self.stage else {
+            return Outcome::Ignored;
+        };
+        let current = rows::icon_of(rows);
+
+        self.grid = Some(IconGrid::new(self.icon_files.clone(), current.as_deref()));
+        Outcome::Redraw
+    }
+
+    fn apply_grid(&mut self, step: GridStep) -> Outcome {
+        match step {
+            GridStep::Ignored => Outcome::Ignored,
+            GridStep::Redraw => Outcome::Redraw,
+            GridStep::Back => {
+                self.grid = None;
+                Outcome::Redraw
+            }
+            GridStep::Picked(icon) => {
+                self.grid = None;
+                if let Stage::Fill { rows, .. } = &mut self.stage {
+                    rows::set_icon(rows, icon.as_deref());
+                }
+                Outcome::Redraw
+            }
         }
     }
 
@@ -205,6 +287,11 @@ impl Form {
         typed: Option<char>,
         clipboard: Option<&str>,
     ) -> Outcome {
+        if let Some(grid) = &mut self.grid {
+            let step = grid.press(code);
+            return self.apply_grid(step);
+        }
+
         let step = match &mut self.stage {
             Stage::PickType { highlighted } => {
                 press_picker(highlighted, code, ItemKind::NAMES.len())
@@ -227,6 +314,7 @@ impl Form {
             Step::Chose(index) => self.chose(index),
             Step::Back => self.back_to_types(),
             Step::Save => self.save(),
+            Step::PickIcon => self.open_grid(),
         }
     }
 
@@ -333,6 +421,7 @@ enum Step {
     Save,
     Delete,
     Cancel,
+    PickIcon,
 }
 
 /// Builds the lines for a picker stage, so the type list and the app list behave alike.
@@ -417,6 +506,7 @@ fn press_fill(
         RowStep::Save => Step::Save,
         RowStep::Delete => Step::Delete,
         RowStep::Cancel => Step::Cancel,
+        RowStep::PickIcon => Step::PickIcon,
     }
 }
 
@@ -452,6 +542,40 @@ mod tests {
 
     fn press(form: &mut Form, code: KeyCode) -> Outcome {
         form.press(code, Modifiers::default(), None, None)
+    }
+
+    fn line_index(form: &Form, label: &str) -> usize {
+        form.lines()
+            .iter()
+            .position(|line| line.label == label)
+            .expect("the line is on the form")
+    }
+
+    #[test]
+    fn a_picked_icon_lands_in_the_field_and_is_saved() {
+        let item = Item {
+            name: "Code".to_owned(),
+            icon: None,
+            tab: 1,
+            slot: 3,
+            kind: ItemKind::App {
+                target: r"C:\Apps\Code.exe".to_owned(),
+            },
+        };
+        let mut form = Form::editing(Tab::FIRST, slot(), &item)
+            .with_icon_files(vec![r"icons\xp\1.ico".to_owned()]);
+        assert_eq!(form.own_icon_source().as_deref(), Some(r"C:\Apps\Code.exe"));
+
+        form.click(line_index(&form, "Pick icon"));
+        assert!(form.grid().is_some());
+        // tile 0 is the app's own icon, so the first file is tile 1
+        form.click(1);
+        assert!(form.grid().is_none());
+
+        let Outcome::Commit(saved) = form.click(line_index(&form, "Save")) else {
+            panic!("save commits");
+        };
+        assert_eq!(saved.icon.as_deref(), Some(r"icons\xp\1.ico"));
     }
 
     fn type_text(form: &mut Form, text: &str) {

@@ -8,10 +8,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use kile_wheel_platform::icon_files::{IMAGE_EXTENSIONS, is_picture, relative_to, resolve, scan};
 use kile_wheel_platform::icons::{IconCache, IconImage};
-
-/// Picture types the wheel can show, matching the Browse dialog's filter.
-const IMAGE_EXTENSIONS: &[&str] = &["ico", "png", "jpg", "jpeg", "bmp", "gif", "webp"];
 
 /// Rendered at the size the wheel uses on a typical display, so a pick looks the same.
 const RENDER_PX: u32 = 48;
@@ -27,6 +25,10 @@ pub struct IconPicker {
     open: bool,
     /// Which field asked, so a page with several icon fields only fills the right one.
     owner: String,
+    /// The path box at the top, seeded with the field's current value.
+    path: String,
+    /// The folder the grid and Browse start in.
+    icons_dir: PathBuf,
     filter: String,
     files: Vec<PathBuf>,
     textures: HashMap<PathBuf, Option<egui::TextureHandle>>,
@@ -47,9 +49,11 @@ impl std::fmt::Debug for IconPicker {
 impl IconPicker {
     /// Rescans on every open, so icons dropped into the folder while the window is up show
     /// without a restart.
-    pub fn open(&mut self, icons_dir: &Path, owner: &str) {
+    pub fn open(&mut self, icons_dir: &Path, owner: &str, current: &str) {
         self.files = scan(icons_dir);
+        self.icons_dir = icons_dir.to_path_buf();
         self.filter.clear();
+        self.path = current.to_owned();
         self.owner = owner.to_owned();
         self.open = true;
     }
@@ -65,7 +69,43 @@ impl IconPicker {
         let mut choice = Choice::Nothing;
         let modal = egui::Modal::new(egui::Id::new("icon_picker")).show(ctx, |ui| {
             ui.set_width(560.0);
-            ui.heading("Choose an icon");
+            ui.heading("Icon");
+
+            // a typed path or Browse, applied with Use or Enter
+            ui.label("Path, or select below");
+            ui.horizontal(|ui| {
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut self.path)
+                        .hint_text(r"icons\something.ico, or a full path")
+                        .desired_width(330.0),
+                );
+                let entered =
+                    field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+
+                if ui.button("Browse").clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .set_directory(&self.icons_dir)
+                        .add_filter("Images", IMAGE_EXTENSIONS)
+                        .pick_file()
+                {
+                    self.path = relative_to(&path, config_root);
+                }
+
+                let typed = self.path.trim();
+                if ui
+                    .add_enabled(!typed.is_empty(), egui::Button::new("Use"))
+                    .clicked()
+                    || (entered && !typed.is_empty())
+                {
+                    choice = Choice::Picked(typed.to_owned());
+                }
+            });
+            if let Some(problem) = path_problem(&self.path, config_root) {
+                ui.colored_label(ui.visuals().warn_fg_color, problem);
+            }
+
+            ui.add_space(6.0);
+            ui.separator();
             ui.horizontal(|ui| {
                 ui.label("Filter");
                 ui.add(
@@ -136,7 +176,7 @@ impl IconPicker {
             ),
             // not rendered yet, or the shell could not draw it
             Some(None) => ui.add(egui::Button::new("?").min_size(size + egui::Vec2::splat(8.0))),
-            None => ui.add(egui::Button::new("…").min_size(size + egui::Vec2::splat(8.0))),
+            None => ui.add(egui::Button::new("â€¦").min_size(size + egui::Vec2::splat(8.0))),
         };
         response.on_hover_text(hover)
     }
@@ -196,6 +236,25 @@ impl IconPicker {
     }
 }
 
+/// Says when a typed path points at nothing, so a typo is caught before Use rather than
+/// showing up later as a blank icon on the wheel. Blank is not a problem: it is how the
+/// box starts.
+fn path_problem(path: &str, config_root: &Path) -> Option<&'static str> {
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+
+    let resolved = resolve(path, config_root);
+    if !resolved.is_file() {
+        return Some("No file there yet. Use it anyway, or pick one below.");
+    }
+    if !is_picture(&resolved) {
+        return Some("That is not a picture the wheel can show.");
+    }
+    None
+}
+
 /// What the picker decided this frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Choice {
@@ -205,66 +264,6 @@ pub enum Choice {
     Cleared,
     /// Relative to the config folder when inside it, so the folder stays portable.
     Picked(String),
-}
-
-/// Every picture in the folder and its subfolders, sorted so numbered packs read in order.
-fn scan(dir: &Path) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    collect(dir, &mut found);
-    found.sort_by_key(|left| natural_key(left));
-    found
-}
-
-fn collect(dir: &Path, found: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
-        if path.is_dir() {
-            collect(&path, found);
-        } else if is_picture(&path) {
-            found.push(path);
-        }
-    }
-}
-
-fn is_picture(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            IMAGE_EXTENSIONS
-                .iter()
-                .any(|known| known.eq_ignore_ascii_case(extension))
-        })
-}
-
-/// Sorts `2.ico` before `10.ico`, which plain text sorting gets backwards.
-fn natural_key(path: &Path) -> (PathBuf, u64, String) {
-    let folder = path.parent().map(Path::to_path_buf).unwrap_or_default();
-    let stem = path
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    let number = stem.parse::<u64>().unwrap_or(u64::MAX);
-    (folder, number, stem)
-}
-
-/// The config stores icon paths relative to its own folder, so moving the folder to
-/// another machine keeps every icon.
-pub fn relative_to(path: &Path, config_root: &Path) -> String {
-    match path.strip_prefix(config_root) {
-        Ok(relative) => relative.to_string_lossy().into_owned(),
-        Err(_) => path.to_string_lossy().into_owned(),
-    }
-}
-
-fn resolve(icon: &str, config_root: &Path) -> PathBuf {
-    let path = Path::new(icon);
-    match path.is_absolute() {
-        true => path.to_path_buf(),
-        false => config_root.join(path),
-    }
 }
 
 /// The shell gives premultiplied BGRA; egui wants premultiplied RGBA.
@@ -284,57 +283,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_numbered_pack_sorts_by_number_not_by_text() {
-        let mut files = [
-            PathBuf::from(r"C:\icons\xp\10.ico"),
-            PathBuf::from(r"C:\icons\xp\2.ico"),
-            PathBuf::from(r"C:\icons\xp\100.ico"),
-        ];
-        files.sort_by_key(|left| natural_key(left));
-
-        let names: Vec<_> = files.iter().filter_map(|file| file.file_stem()).collect();
-        assert_eq!(names, ["2", "10", "100"]);
-    }
-
-    #[test]
-    fn named_icons_follow_numbered_ones_in_the_same_folder() {
-        assert!(natural_key(Path::new(r"C:\i\5.ico")) < natural_key(Path::new(r"C:\i\kiro.png")));
-    }
-
-    #[test]
-    fn only_pictures_are_offered() {
-        assert!(is_picture(Path::new("a.ICO")));
-        assert!(is_picture(Path::new("a.png")));
-        assert!(!is_picture(Path::new("desktop.ini")));
-        assert!(!is_picture(Path::new("notes")));
-    }
-
-    /// The config is meant to move between machines, so a pick inside its folder is stored
-    /// relative to it.
-    #[test]
-    fn a_pick_inside_the_config_folder_is_stored_relative() {
-        let root = Path::new(r"C:\Users\me\AppData\Roaming\kile-wheel-9000");
-        let pick = root.join(r"icons\xp\233.ico");
-
-        assert_eq!(relative_to(&pick, root), r"icons\xp\233.ico");
-        assert_eq!(resolve(r"icons\xp\233.ico", root), pick);
-    }
-
-    #[test]
-    fn a_pick_outside_the_config_folder_stays_absolute() {
-        let root = Path::new(r"C:\config");
-
-        assert_eq!(
-            relative_to(Path::new(r"D:\art\a.ico"), root),
-            r"D:\art\a.ico"
-        );
-        assert_eq!(
-            resolve(r"D:\art\a.ico", root),
-            PathBuf::from(r"D:\art\a.ico")
-        );
-    }
-
-    #[test]
     fn the_pixel_order_is_swapped_to_rgba() {
         let image = IconImage {
             width: 1,
@@ -347,9 +295,28 @@ mod tests {
         assert_eq!(colour.pixels[0].to_array(), [3, 2, 1, 4]);
     }
 
-    /// Scanning reads the real folder; whatever is there, it must not panic.
     #[test]
-    fn scanning_a_missing_folder_finds_nothing() {
-        assert!(scan(Path::new(r"C:\definitely\not\a\folder")).is_empty());
+    fn a_blank_path_is_not_a_problem() {
+        assert_eq!(path_problem("   ", Path::new(r"C:\config")), None);
+    }
+
+    #[test]
+    fn a_path_to_nothing_says_so() {
+        let problem = path_problem(r"icons\nope\missing.ico", Path::new(r"C:\definitely\not"));
+
+        assert!(problem.is_some_and(|text| text.starts_with("No file")));
+    }
+
+    #[test]
+    fn a_real_file_that_is_not_a_picture_says_so() {
+        let windows = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
+        let notepad = Path::new(&windows).join("notepad.exe");
+        if !notepad.is_file() {
+            return;
+        }
+
+        let problem = path_problem(&notepad.to_string_lossy(), Path::new(r"C:\config"));
+
+        assert!(problem.is_some_and(|text| text.contains("not a picture")));
     }
 }

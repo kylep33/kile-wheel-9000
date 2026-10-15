@@ -5,22 +5,26 @@
 //! focus, so the two cannot share one.
 
 use anyhow::{Context, Result};
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
+    Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
     DestroyIcon, DestroyMenu, DestroyWindow, GetCursorPos, GetSystemMetrics, HICON, HMENU,
-    LR_DEFAULTCOLOR, MF_SEPARATOR, MF_STRING, PostMessageW, RegisterClassExW, SM_CXSMICON,
-    SM_CYSMICON, SetForegroundWindow, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    LR_DEFAULTCOLOR, MF_GRAYED, MF_SEPARATOR, MF_STRING, PostMessageW, RegisterClassExW,
+    SM_CXSMICON, SM_CYSMICON, SetForegroundWindow, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
     TrackPopupMenu, WM_APP, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::core::{HSTRING, PCWSTR};
 
 const WINDOW_CLASS: &str = "kile-wheel-9000.tray";
+
+/// Added to the tooltip while the wheel is off, so hovering says which it is.
+const OFF_SUFFIX: &str = " (off)";
 
 /// The icon the notification area shows. Drawn once rather than compiled in as a win32
 /// resource, which would pull rc.exe into the build.
@@ -46,16 +50,24 @@ pub enum Command {
     Settings = 2,
     ReloadConfig = 3,
     Quit = 4,
+    ToggleEnabled = 5,
 }
 
 impl Command {
-    fn label(self) -> &'static str {
+    fn label(self, enabled: bool) -> &'static str {
         match self {
             Self::OpenWheel => "Open wheel",
             Self::Settings => "Settings",
             Self::ReloadConfig => "Reload config",
             Self::Quit => "Quit",
+            Self::ToggleEnabled if enabled => "Disable",
+            Self::ToggleEnabled => "Enable",
         }
+    }
+
+    /// Greyed out while the wheel is off, rather than clicking through to nothing.
+    fn needs_enabled(self) -> bool {
+        matches!(self, Self::OpenWheel)
     }
 
     /// `None` for anything that is not one of ours, which includes the zero that comes back
@@ -66,6 +78,7 @@ impl Command {
             Self::Settings,
             Self::ReloadConfig,
             Self::Quit,
+            Self::ToggleEnabled,
         ]
         .into_iter()
         .find(|command| *command as usize == id)
@@ -76,10 +89,16 @@ impl Command {
 /// app is a single instance, so there is only ever one value to hold.
 static COMMAND_TARGET: AtomicIsize = AtomicIsize::new(0);
 
+/// Whether the wheel is on. Read while building the menu, which happens in the window
+/// procedure and so cannot reach the app.
+static ENABLED: AtomicBool = AtomicBool::new(true);
+
 #[derive(Debug)]
 pub struct Tray {
     window: HWND,
     icon: HICON,
+    /// Kept so the tooltip can be rebuilt when the wheel is turned on or off.
+    name: String,
 }
 
 impl Tray {
@@ -108,7 +127,30 @@ impl Tray {
             anyhow::bail!("the shell refused the tray icon");
         }
 
-        Ok(Self { window, icon })
+        Ok(Self {
+            window,
+            icon,
+            name: tooltip.to_owned(),
+        })
+    }
+
+    /// Tells the icon what the app's state is, for the tooltip and the menu's toggle.
+    pub fn set_enabled(&self, enabled: bool) {
+        ENABLED.store(enabled, Ordering::Relaxed);
+
+        let mut data = icon_data(self.window);
+        data.uFlags = NIF_TIP;
+        write_tooltip(&mut data.szTip, &self.tooltip(enabled));
+
+        // SAFETY: the data outlives the call, and the icon is still registered.
+        let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) };
+    }
+
+    fn tooltip(&self, enabled: bool) -> String {
+        match enabled {
+            true => self.name.clone(),
+            false => format!("{}{OFF_SUFFIX}", self.name),
+        }
     }
 }
 
@@ -213,7 +255,7 @@ unsafe extern "system" fn window_proc(
     if message == WM_TRAY_ICON {
         // the shell packs the mouse message into the low word of lparam
         match lparam.0 as u32 & 0xffff {
-            WM_LBUTTONUP => post(Command::OpenWheel),
+            WM_LBUTTONUP => post(Command::Settings),
             WM_RBUTTONUP => show_menu(window),
             _ => {}
         }
@@ -235,13 +277,16 @@ fn show_menu(window: HWND) {
     let items = [
         Some(Command::OpenWheel),
         Some(Command::Settings),
+        None,
+        Some(Command::ToggleEnabled),
         Some(Command::ReloadConfig),
         None,
         Some(Command::Quit),
     ];
 
+    let enabled = ENABLED.load(Ordering::Relaxed);
     for item in items {
-        append(menu, item);
+        append(menu, item, enabled);
     }
 
     // SAFETY: taking the foreground is what lets the menu close on a click elsewhere. This
@@ -258,17 +303,21 @@ fn show_menu(window: HWND) {
     let _ = unsafe { DestroyMenu(menu) };
 }
 
-fn append(menu: HMENU, item: Option<Command>) {
+fn append(menu: HMENU, item: Option<Command>, enabled: bool) {
     let Some(command) = item else {
         // SAFETY: a separator takes neither an id nor a string.
         let _ = unsafe { AppendMenuW(menu, MF_SEPARATOR, 0, None) };
         return;
     };
 
-    let label = HSTRING::from(command.label());
+    let label = HSTRING::from(command.label(enabled));
+    let flags = match command.needs_enabled() && !enabled {
+        true => MF_STRING | MF_GRAYED,
+        false => MF_STRING,
+    };
 
     // SAFETY: the label stays live for the duration of the call.
-    let _ = unsafe { AppendMenuW(menu, MF_STRING, command as usize, &label) };
+    let _ = unsafe { AppendMenuW(menu, flags, command as usize, &label) };
 }
 
 fn track(menu: HMENU, window: HWND, at: POINT) {
@@ -321,9 +370,16 @@ mod tests {
             Command::Settings,
             Command::ReloadConfig,
             Command::Quit,
+            Command::ToggleEnabled,
         ] {
             assert_eq!(Command::from_id(command as usize), Some(command));
         }
+    }
+
+    #[test]
+    fn the_toggle_says_what_it_will_do() {
+        assert_eq!(Command::ToggleEnabled.label(true), "Disable");
+        assert_eq!(Command::ToggleEnabled.label(false), "Enable");
     }
 
     #[test]

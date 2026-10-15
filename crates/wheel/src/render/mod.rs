@@ -44,7 +44,7 @@ use windows::core::{Interface, Result};
 use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::anim;
-use crate::form::{Line, Petal, RowValue};
+use crate::form::{Line, Petal, RowValue, grid};
 use crate::theme::{self, Metrics, Palette};
 use geometry::{Wedges, on_circle, slot_bearing_rad, slot_edge_rad};
 use text::Fonts;
@@ -82,6 +82,8 @@ const CARET_INSET_PX: f32 = 3.0;
 const CARET_SCROLL_MARGIN_PX: f32 = 14.0;
 /// Keeps a value's text off the edge of its column.
 const VALUE_PADDING_PX: f32 = 4.0;
+/// Room around an icon in the picker grid, so the highlight shows around it.
+const GRID_TILE_PADDING_PX: f32 = 4.0;
 
 /// Where the open animation starts the wheel. Close enough to full size that the wheel is
 /// readable on the first frame, far enough to read as arriving.
@@ -141,6 +143,17 @@ pub struct FormView<'a> {
     pub title: &'a str,
     pub lines: &'a [Line],
     pub progress: f32,
+    /// Drawn instead of the lines while an icon is being picked.
+    pub grid: Option<&'a GridView>,
+}
+
+/// The icon grid's visible page, ready to draw.
+#[derive(Debug)]
+pub struct GridView {
+    /// Icon keys of the visible tiles, in reading order. `None` has nothing to show.
+    pub tiles: Vec<Option<String>>,
+    pub highlighted: Option<usize>,
+    pub caption: String,
 }
 
 /// The GPU side of the overlay.
@@ -238,15 +251,24 @@ impl Renderer {
     pub fn form_row_at(&self, view: &FormView<'_>, point: Vector2) -> Option<usize> {
         let petal = self.petal_for(view);
 
+        if let Some(grid) = view.grid {
+            return (0..grid.tiles.len())
+                .find(|index| contains(&grid::tile_bounds(&petal, *index), point));
+        }
         (0..view.lines.len()).find(|index| contains(&petal.row_bounds(*index), point))
     }
 
     fn petal_for(&self, view: &FormView<'_>) -> Petal {
+        let rows = match view.grid {
+            Some(_) => grid::FORM_ROWS,
+            None => view.lines.len(),
+        };
+
         Petal::new(
             centre_of(self.size_px),
             self.metrics.radius_px,
             slot_bearing_rad(view.slot),
-            view.lines.len(),
+            rows,
             view.progress,
             self.drawable_bounds(),
         )
@@ -400,9 +422,37 @@ impl Renderer {
             self.fonts.hub_tab(),
             &self.palette.accent,
         );
+        if let Some(grid) = view.grid {
+            self.draw_grid(&petal, grid);
+            return;
+        }
         for (index, line) in view.lines.iter().enumerate() {
             self.draw_form_line(&petal, index, line);
         }
+    }
+
+    fn draw_grid(&self, petal: &Petal, view: &GridView) {
+        for (index, key) in view.tiles.iter().enumerate() {
+            let tile = grid::tile_bounds(petal, index);
+
+            if view.highlighted == Some(index) {
+                // SAFETY: the geometry and brush are live for the duration of the call.
+                unsafe {
+                    self.context
+                        .FillRectangle(&tile, self.brush(&self.palette.wedge_selected))
+                };
+            }
+            if let Some(key) = key {
+                self.draw_bitmap(key, form::square_in(tile, GRID_TILE_PADDING_PX));
+            }
+        }
+
+        self.draw_text(
+            &view.caption,
+            grid::caption_bounds(petal),
+            self.fonts.value(),
+            &self.palette.label,
+        );
     }
 
     fn draw_form_line(&self, petal: &Petal, index: usize, line: &Line) {
@@ -664,10 +714,6 @@ impl Renderer {
     }
 
     fn draw_icon(&self, centre: Vector2, bearing: f32, key: &str) {
-        let Some(bitmap) = self.icons.get(key) else {
-            return;
-        };
-
         let at = on_circle(centre, self.metrics.icon_radius_px, bearing);
         let half = self.metrics.icon_size_px / 2.0;
         let bounds = D2D_RECT_F {
@@ -675,6 +721,15 @@ impl Renderer {
             top: at.Y - half,
             right: at.X + half,
             bottom: at.Y + half,
+        };
+        self.draw_bitmap(key, bounds);
+    }
+
+    /// Draws nothing for an icon that was never uploaded, since a missing icon is not
+    /// worth failing the frame over.
+    fn draw_bitmap(&self, key: &str, bounds: D2D_RECT_F) {
+        let Some(bitmap) = self.icons.get(key) else {
+            return;
         };
 
         // SAFETY: the bitmap and bounds are live for the duration of the call.

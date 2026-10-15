@@ -8,10 +8,12 @@ use std::path::Path;
 use kile_wheel_core::config::Config;
 use kile_wheel_core::item::{Item, ItemKind, Position};
 use kile_wheel_core::layout::SlotMemory;
+use kile_wheel_core::names::ConfigPaths;
 use kile_wheel_core::slot::{Slot, Tab};
 #[cfg(test)]
 use kile_wheel_platform::apps::WindowRef;
 use kile_wheel_platform::apps::{AppGroup, AppKey, WindowModel};
+use kile_wheel_platform::icon_files;
 use kile_wheel_platform::identity::{AppIdentity, IdentityCache};
 use kile_wheel_platform::paths::expand;
 use windows::Win32::Foundation::HWND;
@@ -102,6 +104,7 @@ pub struct Layout {
 impl Layout {
     pub fn build(
         config: &Config,
+        paths: &ConfigPaths,
         model: &WindowModel,
         memory: &mut SlotMemory<AppKey>,
         identities: &mut IdentityCache,
@@ -137,10 +140,13 @@ impl Layout {
 
         for (position, item, identity) in &pinned {
             let position = *position;
-            let entry = match item.kind.is_unpinned() {
+            let mut entry = match item.kind.is_unpinned() {
                 true => unpinned_entry(position, memory, &groups, focused),
                 false => pinned_entry(item, identity.as_ref(), &groups, focused),
             };
+            // resolved once here, because the source is also the key the icon is uploaded
+            // and drawn under
+            entry.icon_source = entry.icon_source.map(|source| resolve_icon(paths, &source));
             tabs[position.tab.index()][position.slot.index()] = Some(entry);
         }
 
@@ -260,8 +266,7 @@ pub fn is_hidden(config: &Config, group: &AppGroup<'_>) -> bool {
 }
 
 /// The icon comes from a user-supplied image when one is configured, otherwise from the
-/// item's own target. A configured path is relative to the config folder, so the caller
-/// resolves it before handing it over.
+/// item's own target. A configured path may be relative; [`resolve_icon`] fixes that.
 fn icon_source(item: &Item) -> Option<String> {
     if let Some(icon) = &item.icon {
         return Some(icon.clone());
@@ -271,6 +276,14 @@ fn icon_source(item: &Item) -> Option<String> {
 
 fn icon_path(key: &AppKey) -> String {
     launch_target(key)
+}
+
+/// A configured icon path is relative to the config folder; an extracted one is already
+/// absolute and passes through.
+fn resolve_icon(paths: &ConfigPaths, source: &str) -> String {
+    icon_files::resolve(source, paths.root())
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Slot labels mirror the taskbar: the app, not the window title.
@@ -560,6 +573,28 @@ mod tests {
         let item = app_item("Code", r"C:\Apps\Code.exe", 1, 0);
 
         assert_eq!(icon_source(&item).as_deref(), Some(r"C:\Apps\Code.exe"));
+    }
+
+    /// The resolved path is the key the icon is uploaded and drawn under, so both must
+    /// agree on it.
+    #[test]
+    fn a_configured_icon_resolves_under_the_config_folder() {
+        let paths = ConfigPaths::new(Path::new(r"C:\appdata"));
+
+        assert_eq!(
+            resolve_icon(&paths, r"icons\xp\233.ico"),
+            paths.root().join(r"icons\xp\233.ico").to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn an_absolute_icon_source_passes_through() {
+        let paths = ConfigPaths::new(Path::new(r"C:\appdata"));
+
+        assert_eq!(
+            resolve_icon(&paths, r"C:\Apps\Code.exe"),
+            r"C:\Apps\Code.exe"
+        );
     }
 
     #[test]
