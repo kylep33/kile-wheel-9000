@@ -1,5 +1,5 @@
-//! Synthesising keystrokes for snippet delivery. Everything here is injected, which the
-//! low-level hook filters out, so none of it loops back into the wheel.
+//! Synthesising keystrokes for snippet delivery. Everything here carries
+//! [`OWN_INPUT_TAG`], which the low-level hook skips, so none of it loops back into the wheel.
 
 use thiserror::Error;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -13,6 +13,9 @@ pub struct SendError {
     sent: usize,
     wanted: usize,
 }
+
+/// Marks our own keystrokes, so the hook can still bind keys other apps inject.
+pub const OWN_INPUT_TAG: usize = 0x4B57_3930;
 
 /// A unicode event carries the character in `wScan` and leaves the key code at zero.
 const NO_KEY: VIRTUAL_KEY = VIRTUAL_KEY(0);
@@ -71,7 +74,7 @@ fn key_event(key: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> INPUT {
         wScan: 0,
         dwFlags: flags,
         time: 0,
-        dwExtraInfo: 0,
+        dwExtraInfo: OWN_INPUT_TAG,
     })
 }
 
@@ -81,7 +84,7 @@ fn unicode_event(unit: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
         wScan: unit,
         dwFlags: flags,
         time: 0,
-        dwExtraInfo: 0,
+        dwExtraInfo: OWN_INPUT_TAG,
     })
 }
 

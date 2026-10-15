@@ -22,12 +22,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT,
-    LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, PostMessageW, PostThreadMessageW,
+    LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, PostMessageW, PostThreadMessageW,
     SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_KEYDOWN,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
     WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_XBUTTONDOWN,
     WM_XBUTTONUP, XBUTTON1,
 };
+
+use crate::send::OWN_INPUT_TAG;
 
 /// Posted to the overlay to say the input queue has something in it.
 pub const WM_INPUT_READY: u32 = WM_APP + 1;
@@ -302,8 +304,8 @@ unsafe fn keyboard_swallows(code: i32, wparam: WPARAM, lparam: LPARAM) -> bool {
     // SAFETY: upheld by this function's contract.
     let info = unsafe { *(lparam.0 as *const KBDLLHOOKSTRUCT) };
 
-    // our own SendInput must not loop back through the hook
-    if info.flags.0 & LLKHF_INJECTED.0 != 0 {
+    // only our own SendInput is skipped, since remappers like Logi Options+ inject too
+    if info.dwExtraInfo == OWN_INPUT_TAG {
         return false;
     }
 
