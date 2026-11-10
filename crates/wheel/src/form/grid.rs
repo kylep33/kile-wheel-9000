@@ -4,7 +4,7 @@
 //! to the default is one pick rather than clearing a field.
 
 use kile_wheel_core::binding::{KeyCode, keys};
-use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
+use crate::geom::Rect;
 
 use super::Petal;
 
@@ -181,14 +181,14 @@ fn movement(code: KeyCode) -> Option<isize> {
 }
 
 /// The box tile `index` of the visible page sits in.
-pub fn tile_bounds(petal: &Petal, index: usize) -> D2D_RECT_F {
+pub fn tile_bounds(petal: &Petal, index: usize) -> Rect {
     let (row, column) = (index / COLUMNS, index % COLUMNS);
     let first = petal.row_bounds(row * FORM_ROWS_PER_GRID_ROW);
     let last = petal.row_bounds((row + 1) * FORM_ROWS_PER_GRID_ROW - 1);
     let width = (first.right - first.left) / COLUMNS as f32;
     let left = first.left + width * column as f32;
 
-    D2D_RECT_F {
+    Rect {
         left,
         top: first.top,
         right: left + width,
@@ -196,7 +196,7 @@ pub fn tile_bounds(petal: &Petal, index: usize) -> D2D_RECT_F {
     }
 }
 
-pub fn caption_bounds(petal: &Petal) -> D2D_RECT_F {
+pub fn caption_bounds(petal: &Petal) -> Rect {
     petal.row_bounds(VISIBLE_ROWS * FORM_ROWS_PER_GRID_ROW)
 }
 

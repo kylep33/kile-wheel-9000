@@ -260,22 +260,18 @@ fn path_problem(path: &str, config_root: &Path) -> Option<&'static str> {
 pub enum Choice {
     Nothing,
     Cancelled,
-    /// Back to the icon Windows has for the target.
+    /// Back to the icon the desktop has for the target.
     Cleared,
     /// Relative to the config folder when inside it, so the folder stays portable.
     Picked(String),
 }
 
-/// The shell gives premultiplied BGRA; egui wants premultiplied RGBA.
+/// Both sides are premultiplied RGBA, so this is a copy.
 fn to_colour_image(image: &IconImage) -> egui::ColorImage {
-    let rgba: Vec<u8> = image
-        .bgra
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .flat_map(|pixel| [pixel[2], pixel[1], pixel[0], pixel[3]])
-        .collect();
-    egui::ColorImage::from_rgba_premultiplied([image.width as usize, image.height as usize], &rgba)
+    egui::ColorImage::from_rgba_premultiplied(
+        [image.width as usize, image.height as usize],
+        &image.rgba,
+    )
 }
 
 #[cfg(test)]
@@ -283,16 +279,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_pixel_order_is_swapped_to_rgba() {
+    fn the_pixels_keep_their_order() {
         let image = IconImage {
             width: 1,
             height: 1,
-            bgra: vec![1, 2, 3, 4],
+            rgba: vec![1, 2, 3, 4],
         };
 
         let colour = to_colour_image(&image);
 
-        assert_eq!(colour.pixels[0].to_array(), [3, 2, 1, 4]);
+        assert_eq!(colour.pixels[0].to_array(), [1, 2, 3, 4]);
     }
 
     #[test]
@@ -309,13 +305,9 @@ mod tests {
 
     #[test]
     fn a_real_file_that_is_not_a_picture_says_so() {
-        let windows = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
-        let notepad = Path::new(&windows).join("notepad.exe");
-        if !notepad.is_file() {
-            return;
-        }
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
 
-        let problem = path_problem(&notepad.to_string_lossy(), Path::new(r"C:\config"));
+        let problem = path_problem(&manifest.to_string_lossy(), Path::new("/config"));
 
         assert!(problem.is_some_and(|text| text.contains("not a picture")));
     }

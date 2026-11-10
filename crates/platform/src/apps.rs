@@ -1,38 +1,47 @@
-//! The set of windows the taskbar would show, grouped by app.
+//! The set of windows the taskbar or dock would show, grouped by app.
 //!
-//! Built once at startup and kept current by WinEvent updates, so opening the wheel
-//! never enumerates.
+//! Built once at startup and kept current by the watcher, so opening the wheel never
+//! enumerates.
 
 use std::collections::HashMap;
-use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 
-use windows::Win32::Foundation::{HWND, LPARAM, TRUE};
-use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
-use windows::Win32::Storage::EnhancedStorage::PKEY_AppUserModel_ID;
-use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
-use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GA_ROOT, GW_OWNER, GWL_EXSTYLE, GetAncestor, GetForegroundWindow, GetWindow,
-    GetWindowLongPtrW, IsWindowVisible, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
-};
-use windows::core::{BOOL, Result};
+use thiserror::Error;
 
-use crate::window_class::{is_shell_class, is_uwp_host};
-use crate::window_text::{executable_path, has_title, title};
+use crate::sys;
+use crate::watcher::WindowEvent;
 
-/// How windows are grouped into one wheel slot, matching the taskbar.
+/// A window, as the OS names it. Only meaningful to the backend that handed it out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct WindowId(pub u64);
+
+/// How windows are grouped into one wheel slot, matching the taskbar or dock.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AppKey {
-    /// AppUserModelID, which is how packaged apps are grouped.
-    UserModelId(String),
-    /// Executable path, for everything else.
+    /// What the desktop groups by: an AppUserModelID on Windows, a .desktop id on GNOME,
+    /// a bundle id on macOS.
+    Id(String),
+    /// Executable path, for anything the desktop has no id for.
     Executable(PathBuf),
+}
+
+/// One window as the backend reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowInfo {
+    pub id: WindowId,
+    pub key: AppKey,
+    /// Path of the owning executable, even when grouping went by id. Used for labels and
+    /// the hidden-apps list.
+    pub executable: Option<PathBuf>,
+    /// The app's own display name, where the desktop knows it.
+    pub name: Option<String>,
+    pub title: String,
 }
 
 /// One taskbar-visible window.
 #[derive(Debug, Clone, Copy)]
 pub struct WindowRef<'a> {
-    pub handle: HWND,
+    pub id: WindowId,
     pub title: &'a str,
 }
 
@@ -40,18 +49,18 @@ pub struct WindowRef<'a> {
 #[derive(Debug, Clone)]
 pub struct AppGroup<'a> {
     pub key: &'a AppKey,
-    /// Path of the owning executable, even when grouping went by AppUserModelID. Used for
-    /// labels, because an id like `MSEdge.UserData.Profile2` reads badly on the wheel.
     pub executable: Option<&'a Path>,
+    pub name: Option<&'a str>,
     pub windows: Vec<WindowRef<'a>>,
 }
 
+#[derive(Debug, Error)]
+#[error("{0}")]
+pub struct AppsError(pub(crate) String);
+
 #[derive(Debug)]
 struct TrackedWindow {
-    handle: HWND,
-    key: AppKey,
-    executable: Option<PathBuf>,
-    title: String,
+    info: WindowInfo,
     /// Discovery order, which is what keeps group and window order stable.
     sequence: u64,
 }
@@ -59,76 +68,76 @@ struct TrackedWindow {
 /// Taskbar-visible windows and which one has focus.
 #[derive(Debug, Default)]
 pub struct WindowModel {
-    tracked: HashMap<isize, TrackedWindow>,
-    focused: Option<isize>,
+    tracked: HashMap<WindowId, TrackedWindow>,
+    focused: Option<WindowId>,
     next_sequence: u64,
 }
 
 impl WindowModel {
     /// One full sweep. Called at startup only.
-    pub fn rebuild(&mut self) -> Result<()> {
-        self.tracked.clear();
-        for window in enumerate_windows()? {
-            self.add(window);
-        }
-
-        // SAFETY: returns a borrowed handle or null, no pointers involved.
-        self.set_focused(unsafe { GetForegroundWindow() });
+    pub fn rebuild(&mut self) -> Result<(), AppsError> {
+        let (windows, focused) = sys::apps::enumerate()?;
+        self.replace(windows, focused);
         Ok(())
     }
 
-    /// Adds the window if the taskbar would show it.
-    pub fn add(&mut self, window: HWND) {
-        if !is_taskbar_window(window) {
+    pub fn apply(&mut self, event: WindowEvent) {
+        match event {
+            WindowEvent::Changed(id) => self.refresh(id),
+            WindowEvent::Vanished(id) => self.remove(id),
+            WindowEvent::Focused(id) => self.set_focused(id),
+            WindowEvent::Snapshot { windows, focused } => self.replace(windows, focused),
+        }
+    }
+
+    /// Takes a whole new list, keeping each known window's place in the order.
+    fn replace(&mut self, windows: Vec<WindowInfo>, focused: Option<WindowId>) {
+        let mut kept = HashMap::with_capacity(windows.len());
+        for info in windows {
+            let sequence = match self.tracked.get(&info.id) {
+                Some(known) => known.sequence,
+                None => self.take_sequence(),
+            };
+            kept.insert(info.id, TrackedWindow { info, sequence });
+        }
+
+        self.tracked = kept;
+        self.focused = focused.filter(|id| self.tracked.contains_key(id));
+    }
+
+    /// Re-checks one window, since one can become taskbar-worthy after it is created,
+    /// which is how packaged apps appear.
+    fn refresh(&mut self, id: WindowId) {
+        if let Some(tracked) = self.tracked.get_mut(&id) {
+            match sys::apps::is_listed(id) {
+                true => tracked.info.title = sys::apps::title(id),
+                false => self.remove(id),
+            }
             return;
         }
 
-        let executable = executable_path(window);
-        let Some(key) = app_key(window, executable.as_deref()) else {
-            return;
-        };
-
-        let sequence = self.next_sequence;
-        self.next_sequence += 1;
-        self.tracked.insert(
-            handle_key(window),
-            TrackedWindow {
-                handle: window,
-                key,
-                executable,
-                title: title(window),
-                sequence,
-            },
-        );
+        if let Some(info) = sys::apps::describe(id) {
+            let sequence = self.take_sequence();
+            self.tracked.insert(id, TrackedWindow { info, sequence });
+        }
     }
 
-    pub fn remove(&mut self, window: HWND) {
-        let key = handle_key(window);
-        self.tracked.remove(&key);
-        if self.focused == Some(key) {
+    fn remove(&mut self, id: WindowId) {
+        self.tracked.remove(&id);
+        if self.focused == Some(id) {
             self.focused = None;
         }
     }
 
-    /// Re-checks the window, since one can become taskbar-worthy after it is created,
-    /// which is how packaged apps appear.
-    pub fn refresh(&mut self, window: HWND) {
-        if !is_taskbar_window(window) {
-            self.remove(window);
-            return;
-        }
-
-        match self.tracked.get_mut(&handle_key(window)) {
-            Some(tracked) => tracked.title = title(window),
-            None => self.add(window),
-        }
+    fn set_focused(&mut self, id: WindowId) {
+        self.refresh(id);
+        self.focused = self.tracked.contains_key(&id).then_some(id);
     }
 
-    pub fn set_focused(&mut self, window: HWND) {
-        self.refresh(window);
-
-        let key = handle_key(window);
-        self.focused = self.tracked.contains_key(&key).then_some(key);
+    fn take_sequence(&mut self) -> u64 {
+        let sequence = self.next_sequence;
+        self.next_sequence += 1;
+        sequence
     }
 
     /// Groups ordered by when each app's first window appeared, so a close elsewhere
@@ -136,7 +145,7 @@ impl WindowModel {
     pub fn groups(&self) -> Vec<AppGroup<'_>> {
         let mut by_key: HashMap<&AppKey, Vec<&TrackedWindow>> = HashMap::new();
         for tracked in self.tracked.values() {
-            by_key.entry(&tracked.key).or_default().push(tracked);
+            by_key.entry(&tracked.info.key).or_default().push(tracked);
         }
 
         let mut ordered: Vec<(u64, AppGroup<'_>)> = by_key
@@ -150,12 +159,15 @@ impl WindowModel {
 
     pub fn focused_key(&self) -> Option<&AppKey> {
         let focused = self.focused?;
-        self.tracked.get(&focused).map(|tracked| &tracked.key)
+        self.tracked.get(&focused).map(|tracked| &tracked.info.key)
     }
 
-    pub fn focused_window(&self) -> Option<HWND> {
-        let focused = self.focused?;
-        self.tracked.get(&focused).map(|tracked| tracked.handle)
+    pub fn focused_window(&self) -> Option<WindowId> {
+        self.focused
+    }
+
+    pub fn title_of(&self, id: WindowId) -> Option<&str> {
+        self.tracked.get(&id).map(|tracked| tracked.info.title.as_str())
     }
 }
 
@@ -166,162 +178,87 @@ fn build_group<'a>(key: &'a AppKey, mut windows: Vec<&'a TrackedWindow>) -> (u64
         .first()
         .expect("a group is only built from at least one window");
     let first_seen = first.sequence;
-    let executable = first.executable.as_deref();
 
     let group = AppGroup {
         key,
-        executable,
+        executable: first.info.executable.as_deref(),
+        name: first.info.name.as_deref(),
         windows: windows
             .into_iter()
             .map(|tracked| WindowRef {
-                handle: tracked.handle,
-                title: &tracked.title,
+                id: tracked.info.id,
+                title: &tracked.info.title,
             })
             .collect(),
     };
     (first_seen, group)
 }
 
-/// Approximates what the taskbar shows.
-///
-/// A shell-cloaked window is kept, because that is also how a window on another
-/// virtual desktop or a hidden komorebi workspace presents.
-pub fn is_taskbar_window(window: HWND) -> bool {
-    // SAFETY: handles a null or stale handle by reporting not-visible.
-    if !unsafe { IsWindowVisible(window) }.as_bool() {
-        return false;
-    }
-    if !is_top_level(window) {
-        return false;
-    }
-    if is_shell_class(window) || !has_title(window) || !has_app_window_style(window) {
-        return false;
-    }
-
-    // a cloaked packaged-app host is suspended, not merely off-desktop
-    !(is_uwp_host(window) && is_cloaked(window))
-}
-
-/// Only top-level windows are taskbar entries.
-///
-/// The startup sweep only ever sees top-level windows, but window events also fire for
-/// children. Chromium and Electron apps (Chrome, Kiro, VS Code, Obsidian) each host a
-/// visible, titled child, "Chrome Legacy Window", which passes every other check because
-/// a child has a parent rather than an owner. Without this it joined the app's group as a
-/// second window.
-///
-/// The `WS_CHILD` style is not used, because some genuinely top-level windows carry it.
-/// Being its own root is what top-level actually means.
-fn is_top_level(window: HWND) -> bool {
-    // SAFETY: returns a borrowed handle or null, no pointers involved.
-    let root = unsafe { GetAncestor(window, GA_ROOT) };
-    root == window
-}
-
-fn has_app_window_style(window: HWND) -> bool {
-    // SAFETY: reads a style word; a bad handle yields zero.
-    let extended = unsafe { GetWindowLongPtrW(window, GWL_EXSTYLE) } as u32;
-
-    if extended & WS_EX_TOOLWINDOW.0 != 0 {
-        return false;
-    }
-    if extended & WS_EX_APPWINDOW.0 != 0 {
-        return true;
-    }
-    owner(window).is_none()
-}
-
-fn owner(window: HWND) -> Option<HWND> {
-    // SAFETY: returns a borrowed handle or an error when there is no owner.
-    let owner = unsafe { GetWindow(window, GW_OWNER) }.ok()?;
-    (!owner.is_invalid()).then_some(owner)
-}
-
-fn is_cloaked(window: HWND) -> bool {
-    let mut cloaked: u32 = 0;
-
-    // SAFETY: the out-pointer and its size describe the same live u32.
-    let read = unsafe {
-        DwmGetWindowAttribute(
-            window,
-            DWMWA_CLOAKED,
-            (&raw mut cloaked).cast::<c_void>(),
-            size_of::<u32>() as u32,
-        )
-    };
-
-    read.is_ok() && cloaked != 0
-}
-
-fn app_key(window: HWND, executable: Option<&Path>) -> Option<AppKey> {
-    if let Some(id) = user_model_id(window) {
-        return Some(AppKey::UserModelId(id));
-    }
-    executable.map(|path| AppKey::Executable(path.to_owned()))
-}
-
-fn user_model_id(window: HWND) -> Option<String> {
-    // SAFETY: the window handle is live and the interface is released on drop.
-    let store: IPropertyStore = unsafe { SHGetPropertyStoreForWindow(window) }.ok()?;
-
-    // SAFETY: the property key is a static constant owned by the shell.
-    let value = unsafe { store.GetValue(&PKEY_AppUserModel_ID) }.ok()?;
-
-    let id = value.to_string();
-    (!id.is_empty()).then_some(id)
-}
-
-fn handle_key(window: HWND) -> isize {
-    window.0 as isize
-}
-
-fn enumerate_windows() -> Result<Vec<HWND>> {
-    let mut found: Vec<HWND> = Vec::new();
-
-    // SAFETY: `found` outlives the enumeration, which is synchronous.
-    unsafe { EnumWindows(Some(collect_window), LPARAM((&raw mut found) as isize)) }?;
-    Ok(found)
-}
-
-unsafe extern "system" fn collect_window(window: HWND, param: LPARAM) -> BOOL {
-    // SAFETY: param is the &mut Vec handed over by enumerate_windows.
-    let found = unsafe { &mut *(param.0 as *mut Vec<HWND>) };
-    found.push(window);
-    TRUE
+/// What the desktop launches a running app by, for pinning it or opening another window.
+pub fn launch_target(key: &AppKey) -> String {
+    sys::apps::launch_target(key)
 }
 
 #[cfg(test)]
 mod tests {
-    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GW_CHILD};
-    use windows::core::w;
-
     use super::*;
 
-    /// Every window the startup sweep returns is top-level, so the new check must not
-    /// throw any of them away.
-    #[test]
-    fn every_enumerated_window_counts_as_top_level() {
-        let windows = enumerate_windows().expect("windows can be enumerated");
-
-        assert!(!windows.is_empty());
-        assert!(windows.iter().all(|window| is_top_level(*window)));
+    fn window(id: u64, app: &str) -> WindowInfo {
+        WindowInfo {
+            id: WindowId(id),
+            key: AppKey::Id(app.to_owned()),
+            executable: None,
+            name: None,
+            title: format!("window {id}"),
+        }
     }
 
-    /// The regression: a child window, like Chromium's "Chrome Legacy Window", must never
-    /// become a taskbar entry, whatever its title and visibility say. The taskbar's own
-    /// children stand in for it, since they are present on any desktop.
     #[test]
-    fn a_child_window_is_never_a_taskbar_window() {
-        // SAFETY: looks a window up by class; null when there is no taskbar.
-        let Ok(taskbar) = (unsafe { FindWindowW(w!("Shell_TrayWnd"), None) }) else {
-            return;
-        };
-        // SAFETY: returns a borrowed handle or an error when there are no children.
-        let Ok(child) = (unsafe { GetWindow(taskbar, GW_CHILD) }) else {
-            return;
-        };
+    fn a_snapshot_groups_windows_by_app() {
+        let mut model = WindowModel::default();
+        model.apply(WindowEvent::Snapshot {
+            windows: vec![window(1, "a"), window(2, "b"), window(3, "a")],
+            focused: Some(WindowId(2)),
+        });
 
-        assert!(!is_top_level(child));
-        assert!(!is_taskbar_window(child));
+        let groups = model.groups();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].windows.len(), 2);
+        assert_eq!(model.focused_key(), Some(&AppKey::Id("b".to_owned())));
+    }
+
+    /// A later snapshot must not shuffle the slots apps already sit in.
+    #[test]
+    fn a_new_snapshot_keeps_the_order_apps_appeared_in() {
+        let mut model = WindowModel::default();
+        model.apply(WindowEvent::Snapshot {
+            windows: vec![window(1, "a"), window(2, "b")],
+            focused: None,
+        });
+        model.apply(WindowEvent::Snapshot {
+            windows: vec![window(3, "c"), window(2, "b"), window(1, "a")],
+            focused: None,
+        });
+
+        let order: Vec<&AppKey> = model.groups().iter().map(|group| group.key).collect();
+        assert_eq!(
+            order,
+            [
+                &AppKey::Id("a".to_owned()),
+                &AppKey::Id("b".to_owned()),
+                &AppKey::Id("c".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn focus_on_a_window_that_is_gone_is_dropped() {
+        let mut model = WindowModel::default();
+        model.apply(WindowEvent::Snapshot {
+            windows: vec![window(1, "a")],
+            focused: Some(WindowId(9)),
+        });
+
+        assert_eq!(model.focused_window(), None);
     }
 }

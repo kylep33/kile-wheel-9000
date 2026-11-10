@@ -1,5 +1,7 @@
 //! General: how the wheel behaves outside the wheel itself.
 
+use kile_wheel_platform::os::DESKTOP;
+
 use crate::ui::Settings;
 
 pub fn draw(settings: &mut Settings, ui: &mut egui::Ui) {
@@ -32,13 +34,12 @@ pub fn draw(settings: &mut Settings, ui: &mut egui::Ui) {
     ui.separator();
     ui.add_space(8.0);
 
-    // this one is not ours to change: the logon task runs with highest privileges, which
-    // an unelevated settings window cannot register
+    // this one is not ours to change: the installer owns the login entry, and on Windows
+    // it runs elevated, which an unelevated settings window cannot register
     ui.add_enabled_ui(false, |ui| {
-        super::row(ui, "Start with Windows", |ui| {
+        super::row(ui, "Start at login", |ui| {
             ui.checkbox(&mut general.start_with_windows, "");
         });
     });
-    ui.label("  Managed by install.ps1, which registers the elevated logon task.");
-    ui.label("  Run uninstall.ps1 to remove it.");
+    ui.label(format!("  {}", DESKTOP.autostart_note));
 }

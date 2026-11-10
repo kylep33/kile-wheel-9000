@@ -4,9 +4,7 @@
 //! axis aligned, because text bent around an arc looks clever and reads badly.
 
 use kile_wheel_core::select::SECTOR_RAD;
-use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
-use windows_numerics::Vector2;
-
+use crate::geom::{Point, Rect};
 use crate::render::geometry::on_circle;
 
 /// How much wider than its slice the neck is, so the join reads as deliberate.
@@ -35,7 +33,7 @@ pub struct Petal {
     /// Angular half-width of the neck.
     pub neck_half_span_rad: f32,
     pub bearing_rad: f32,
-    pub panel: D2D_RECT_F,
+    pub panel: Rect,
     pub corner_px: f32,
     pub title_height_px: f32,
     pub row_height_px: f32,
@@ -48,12 +46,12 @@ impl Petal {
     /// `bounds` is the drawable area; the panel is kept inside it, so a slice near an edge
     /// gets a panel that has slid along rather than one that is cut off.
     pub fn new(
-        centre: Vector2,
+        centre: Point,
         radius_px: f32,
         bearing_rad: f32,
         rows: usize,
         progress: f32,
-        bounds: D2D_RECT_F,
+        bounds: Rect,
     ) -> Self {
         let grown = progress.clamp(0.0, 1.0);
 
@@ -84,13 +82,13 @@ impl Petal {
     }
 
     /// The box one row occupies, counting from the first field under the title.
-    pub fn row_bounds(&self, index: usize) -> D2D_RECT_F {
+    pub fn row_bounds(&self, index: usize) -> Rect {
         let top = self.panel.top
             + self.padding_px
             + self.title_height_px
             + self.row_height_px * index as f32;
 
-        D2D_RECT_F {
+        Rect {
             left: self.panel.left + self.padding_px,
             top,
             right: self.panel.right - self.padding_px,
@@ -98,8 +96,8 @@ impl Petal {
         }
     }
 
-    pub fn title_bounds(&self) -> D2D_RECT_F {
-        D2D_RECT_F {
+    pub fn title_bounds(&self) -> Rect {
+        Rect {
             left: self.panel.left + self.padding_px,
             top: self.panel.top + self.padding_px,
             right: self.panel.right - self.padding_px,
@@ -108,24 +106,24 @@ impl Petal {
     }
 }
 
-fn centred_rect(centre: Vector2, width: f32, height: f32) -> D2D_RECT_F {
-    D2D_RECT_F {
-        left: centre.X - width / 2.0,
-        top: centre.Y - height / 2.0,
-        right: centre.X + width / 2.0,
-        bottom: centre.Y + height / 2.0,
+fn centred_rect(centre: Point, width: f32, height: f32) -> Rect {
+    Rect {
+        left: centre.x - width / 2.0,
+        top: centre.y - height / 2.0,
+        right: centre.x + width / 2.0,
+        bottom: centre.y + height / 2.0,
     }
 }
 
 /// Slides the rect until it fits, rather than shrinking it, so the text keeps its size.
-fn clamp_into(rect: D2D_RECT_F, bounds: D2D_RECT_F) -> D2D_RECT_F {
+fn clamp_into(rect: Rect, bounds: Rect) -> Rect {
     let width = rect.right - rect.left;
     let height = rect.bottom - rect.top;
 
     let left = rect.left.min(bounds.right - width).max(bounds.left);
     let top = rect.top.min(bounds.bottom - height).max(bounds.top);
 
-    D2D_RECT_F {
+    Rect {
         left,
         top,
         right: left + width,
@@ -138,12 +136,12 @@ mod tests {
     use super::*;
     use kile_wheel_core::slot::{Direction, Slot};
 
-    const CENTRE: Vector2 = Vector2 { X: 600.0, Y: 600.0 };
+    const CENTRE: Point = Point { x: 600.0, y: 600.0 };
     const RADIUS_PX: f32 = 300.0;
     const ROWS: usize = 6;
 
-    fn window() -> D2D_RECT_F {
-        D2D_RECT_F {
+    fn window() -> Rect {
+        Rect {
             left: 0.0,
             top: 0.0,
             right: 1200.0,
@@ -157,11 +155,11 @@ mod tests {
         Petal::new(CENTRE, RADIUS_PX, bearing, ROWS, progress, window())
     }
 
-    fn width_of(rect: D2D_RECT_F) -> f32 {
+    fn width_of(rect: Rect) -> f32 {
         rect.right - rect.left
     }
 
-    fn height_of(rect: D2D_RECT_F) -> f32 {
+    fn height_of(rect: Rect) -> f32 {
         rect.bottom - rect.top
     }
 
@@ -220,7 +218,7 @@ mod tests {
 
     #[test]
     fn clamping_slides_rather_than_shrinks() {
-        let rect = D2D_RECT_F {
+        let rect = Rect {
             left: -50.0,
             top: 10.0,
             right: 50.0,
@@ -265,10 +263,10 @@ mod tests {
         for slot in Slot::all() {
             let petal = petal_at(slot, 1.0);
             let furthest = [
-                petal.panel.left - CENTRE.X,
-                petal.panel.right - CENTRE.X,
-                petal.panel.top - CENTRE.Y,
-                petal.panel.bottom - CENTRE.Y,
+                petal.panel.left - CENTRE.x,
+                petal.panel.right - CENTRE.x,
+                petal.panel.top - CENTRE.y,
+                petal.panel.bottom - CENTRE.y,
             ]
             .into_iter()
             .map(f32::abs)

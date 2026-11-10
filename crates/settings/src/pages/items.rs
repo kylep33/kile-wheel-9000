@@ -6,6 +6,7 @@
 
 use kile_wheel_core::item::{Item, ItemKind, SCRIPT_PRESETS, SnippetMode};
 use kile_wheel_core::slot::{Slot, Tab};
+use kile_wheel_platform::os::DESKTOP;
 use kile_wheel_platform::paths::expand;
 
 use super::mini_wheel::{self, DragState, Palette, SliceView, WheelSpec};
@@ -522,11 +523,11 @@ fn draw_unpinned(ui: &mut egui::Ui) {
 fn draw_app(ui: &mut egui::Ui, target: &mut String) {
     super::path_row(ui, "Target", target, || {
         rfd::FileDialog::new()
-            .add_filter("Programs and shortcuts", &["exe", "lnk", "bat", "cmd"])
+            .add_filter("Apps", DESKTOP.app_file_types)
             .pick_file()
     });
-    ui.label("  An exe, a shortcut, or shell:AppsFolder\\<AppUserModelID> for a Store app.");
-    ui.label("  Environment variables such as %LOCALAPPDATA% are expanded.");
+    ui.label(format!("  {}", DESKTOP.app_target_hint));
+    ui.label(format!("  {} are expanded.", DESKTOP.variable_hint));
 }
 
 fn draw_script(
@@ -568,13 +569,9 @@ fn draw_url(
     });
 
     let mut chosen = browser.clone().unwrap_or_default();
-    super::path_row(ui, "Browser", &mut chosen, || {
-        rfd::FileDialog::new()
-            .add_filter("Programs", &["exe"])
-            .pick_file()
-    });
+    super::path_row(ui, "Browser", &mut chosen, || rfd::FileDialog::new().pick_file());
     *browser = Some(chosen).filter(|text| !text.trim().is_empty());
-    ui.label("  Leave blank to use whichever browser Windows opens links with.");
+    ui.label("  Leave blank to use the default browser.");
 
     super::optional_text(ui, "Browser arguments", browser_args);
     ui.label("  For a specific Chrome or Edge profile: --profile-directory=\"Profile 2\"");
@@ -604,7 +601,10 @@ fn draw_snippet(ui: &mut egui::Ui, text: &mut String, mode: &mut SnippetMode) {
 
 fn draw_folder(ui: &mut egui::Ui, path: &mut String) {
     super::path_row(ui, "Folder", path, || rfd::FileDialog::new().pick_folder());
-    ui.label("  Environment variables such as %USERPROFILE% are expanded.");
+    ui.label(format!(
+        "  Opens in {}. {} are expanded.",
+        DESKTOP.file_manager, DESKTOP.variable_hint
+    ));
 }
 
 fn draw_terminal(
@@ -614,22 +614,26 @@ fn draw_terminal(
     distro: &mut Option<String>,
     cwd: &mut Option<String>,
 ) {
-    super::optional_choice(
-        ui,
-        "Profile",
-        profile,
-        &settings.terminal_profiles,
-        "Windows Terminal settings not found",
-    );
-    super::optional_choice(
-        ui,
-        "WSL distro",
-        distro,
-        &settings.wsl_distros,
-        "No WSL distributions found",
-    );
+    // profiles and distros are Windows Terminal and WSL ideas, so elsewhere they are left
+    // as they are in the config and not offered
+    if DESKTOP.has_terminal_profiles {
+        super::optional_choice(
+            ui,
+            "Profile",
+            profile,
+            &settings.terminal_profiles,
+            "Windows Terminal settings not found",
+        );
+        super::optional_choice(
+            ui,
+            "WSL distro",
+            distro,
+            &settings.wsl_distros,
+            "No WSL distributions found",
+        );
+    }
     super::optional_text(ui, "Start in", cwd);
-    ui.label("  A Windows path, or a Linux path when a WSL distro is set.");
+    ui.label(format!("  {}", DESKTOP.terminal_cwd_hint));
 }
 
 /// Says what is stopping Done, rather than leaving it greyed out for no visible reason.

@@ -1,0 +1,40 @@
+
+# An app target is an exe, a shortcut, or shell:AppsFolder\<AppUserModelID>.
+# [[items]]
+# type = "app"
+# name = "VS Code"
+# target = "%LOCALAPPDATA%\\Programs\\Microsoft VS Code\\Code.exe"
+# tab = 1
+# slot = 0
+
+# [[items]]
+# type = "url"
+# name = "Jira"
+# url = "https://example.atlassian.net"
+# browser = "msedge.exe"
+# tab = 1
+# slot = 2
+
+# [[items]]
+# type = "script"
+# name = "Deploy"
+# path = "%USERPROFILE%\\scripts\\deploy.sh"
+# exec = "wt.exe -- \"C:\\Program Files\\Git\\bin\\bash.exe\" \"{path}\""
+# tab = 1
+# slot = 4
+
+# [[items]]
+# type = "folder"
+# name = "Projects"
+# path = "%USERPROFILE%\\projects"
+# tab = 1
+# slot = 6
+
+# [[items]]
+# type = "terminal"
+# name = "Ubuntu"
+# profile = "Ubuntu"
+# distro = "Ubuntu"
+# cwd = "~"
+# tab = 1
+# slot = 7

@@ -8,6 +8,30 @@ use crate::slot::{Slot, Tab};
 pub const PATH_PLACEHOLDER: &str = "{path}";
 
 /// Ready-made exec templates offered by the settings window. Still freely editable.
+/// The first is what a new script item starts with.
+#[cfg(target_os = "linux")]
+pub const SCRIPT_PRESETS: &[(&str, &str)] = &[
+    (
+        "Bash in a terminal",
+        r#"x-terminal-emulator -e bash "{path}""#,
+    ),
+    ("Bash, no window", r#"bash "{path}""#),
+    ("Python 3", r#"python3 "{path}""#),
+];
+
+/// Ready-made exec templates offered by the settings window. Still freely editable.
+/// The first is what a new script item starts with.
+#[cfg(target_os = "macos")]
+pub const SCRIPT_PRESETS: &[(&str, &str)] = &[
+    ("Terminal", r#"open -a Terminal "{path}""#),
+    ("zsh, no window", r#"zsh "{path}""#),
+    ("Bash, no window", r#"bash "{path}""#),
+    ("Python 3", r#"python3 "{path}""#),
+];
+
+/// Ready-made exec templates offered by the settings window. Still freely editable.
+/// The first is what a new script item starts with.
+#[cfg(target_os = "windows")]
 pub const SCRIPT_PRESETS: &[(&str, &str)] = &[
     (
         "Git Bash in Windows Terminal",

@@ -75,9 +75,9 @@ mod tests {
     #[test]
     fn a_numbered_pack_sorts_by_number_not_by_text() {
         let mut files = [
-            PathBuf::from(r"C:\icons\xp\10.ico"),
-            PathBuf::from(r"C:\icons\xp\2.ico"),
-            PathBuf::from(r"C:\icons\xp\100.ico"),
+            PathBuf::from("/icons/xp/10.ico"),
+            PathBuf::from("/icons/xp/2.ico"),
+            PathBuf::from("/icons/xp/100.ico"),
         ];
         files.sort_by_key(|path| natural_key(path));
 
@@ -87,7 +87,7 @@ mod tests {
 
     #[test]
     fn named_icons_follow_numbered_ones_in_the_same_folder() {
-        assert!(natural_key(Path::new(r"C:\i\5.ico")) < natural_key(Path::new(r"C:\i\kiro.png")));
+        assert!(natural_key(Path::new("/i/5.ico")) < natural_key(Path::new("/i/kiro.png")));
     }
 
     #[test]
@@ -100,29 +100,25 @@ mod tests {
 
     #[test]
     fn a_pick_inside_the_config_folder_is_stored_relative() {
-        let root = Path::new(r"C:\Users\me\AppData\Roaming\kile-wheel-9000");
-        let pick = root.join(r"icons\xp\233.ico");
+        let root = std::env::temp_dir().join("kile-wheel-9000");
+        let pick = root.join("icons/xp/233.ico");
 
-        assert_eq!(relative_to(&pick, root), r"icons\xp\233.ico");
-        assert_eq!(resolve(r"icons\xp\233.ico", root), pick);
+        assert_eq!(relative_to(&pick, &root), "icons/xp/233.ico");
+        assert_eq!(resolve("icons/xp/233.ico", &root), pick);
     }
 
     #[test]
     fn a_pick_outside_the_config_folder_stays_absolute() {
-        let root = Path::new(r"C:\config");
+        let root = std::env::temp_dir().join("config");
+        let art = std::env::temp_dir().join("art").join("a.ico");
+        let written = art.to_string_lossy().into_owned();
 
-        assert_eq!(
-            relative_to(Path::new(r"D:\art\a.ico"), root),
-            r"D:\art\a.ico"
-        );
-        assert_eq!(
-            resolve(r"D:\art\a.ico", root),
-            PathBuf::from(r"D:\art\a.ico")
-        );
+        assert_eq!(relative_to(&art, &root), written);
+        assert_eq!(resolve(&written, &root), art);
     }
 
     #[test]
     fn scanning_a_missing_folder_finds_nothing() {
-        assert!(scan(Path::new(r"C:\definitely\not\a\folder")).is_empty());
+        assert!(scan(Path::new("/definitely/not/a/folder")).is_empty());
     }
 }

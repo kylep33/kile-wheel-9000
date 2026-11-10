@@ -1,32 +1,30 @@
 //! Icon extraction and its in-memory cache.
+//!
+//! Picture files are decoded here, the same way on every OS. Anything else, an app, a
+//! folder or a script, gets the icon the desktop itself shows for it.
 
 use std::collections::HashMap;
-use std::ffi::c_void;
+use std::path::Path;
 
-use windows::Win32::Foundation::SIZE;
-use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC, GetDIBits,
-    GetObjectW, HBITMAP, ReleaseDC,
-};
-use windows::Win32::UI::Shell::{
-    IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
-};
-use windows::core::HSTRING;
+use tracing::debug;
 
-/// BGRA, which is the only layout Direct2D takes without a conversion step.
+use crate::icon_files::is_picture;
+use crate::sys;
+
+/// Room for a crisper icon than asked for, on a scaled display, without keeping a
+/// full-size photo in memory.
+const OVERSAMPLE: u32 = 2;
+
 const BYTES_PER_PIXEL: usize = 4;
 const ALPHA_OFFSET: usize = 3;
 const MAX_CHANNEL: u32 = 255;
-const BITS_PER_PIXEL: u16 = 32;
-const SINGLE_PLANE: u16 = 1;
-const FIRST_SCANLINE: u32 = 0;
 
-/// An icon's pixels, premultiplied and ready to upload.
+/// An icon's pixels: RGBA, premultiplied, rows top to bottom.
 #[derive(Debug, Clone)]
 pub struct IconImage {
     pub width: u32,
     pub height: u32,
-    pub bgra: Vec<u8>,
+    pub rgba: Vec<u8>,
 }
 
 /// Icons kept for the process lifetime, because there are only ever as many as there are
@@ -38,7 +36,7 @@ pub struct IconCache {
 }
 
 impl IconCache {
-    /// `None` when the source has no icon the shell can render.
+    /// `None` when the source has no icon that can be rendered.
     pub fn get(&mut self, source: &str, size_px: u32) -> Option<&IconImage> {
         if !self.images.contains_key(source) {
             self.images
@@ -53,98 +51,43 @@ impl IconCache {
     }
 }
 
-/// Asks the shell to render the icon, which handles exes, shortcuts, folders, documents
-/// and `shell:AppsFolder\<AppUserModelID>` alike.
 fn extract(source: &str, size_px: u32) -> Option<IconImage> {
-    let path = HSTRING::from(source);
-    let wanted = SIZE {
-        cx: size_px as i32,
-        cy: size_px as i32,
-    };
-
-    // SAFETY: the path stays live for the call; the factory is released on drop.
-    let factory: IShellItemImageFactory =
-        unsafe { SHCreateItemFromParsingName(&path, None) }.ok()?;
-
-    // SAFETY: BIGGERSIZEOK lets the shell hand back a crisper icon than we asked for.
-    let bitmap = unsafe { factory.GetImage(wanted, SIIGBF_BIGGERSIZEOK | SIIGBF_ICONONLY) }.ok()?;
-
-    let image = read_pixels(bitmap);
-
-    // SAFETY: the bitmap came from GetImage and is ours to free.
-    let _ = unsafe { DeleteObject(bitmap.into()) };
-    image
+    let path = Path::new(source);
+    match is_picture(path) {
+        true => decode_picture(path, size_px),
+        false => sys::icons::extract(source, size_px),
+    }
 }
 
-fn read_pixels(bitmap: HBITMAP) -> Option<IconImage> {
-    let (width, height) = dimensions(bitmap)?;
-
-    let mut header = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: width as i32,
-            // negative height asks for top-down rows, matching how Direct2D reads them
-            biHeight: -(height as i32),
-            biPlanes: SINGLE_PLANE,
-            biBitCount: BITS_PER_PIXEL,
-            biCompression: BI_RGB.0,
-            ..Default::default()
-        },
-        ..Default::default()
+pub(crate) fn decode_picture(path: &Path, size_px: u32) -> Option<IconImage> {
+    let picture = match image::open(path) {
+        Ok(picture) => picture,
+        Err(error) => {
+            debug!("no icon from {}: {error}", path.display());
+            return None;
+        }
     };
 
-    let mut pixels = vec![0u8; width as usize * height as usize * BYTES_PER_PIXEL];
-
-    // SAFETY: a null window handle gives the screen DC, which is released below.
-    let screen = unsafe { GetDC(None) };
-
-    // SAFETY: the buffer is sized from the header, and both outlive the call.
-    let copied = unsafe {
-        GetDIBits(
-            screen,
-            bitmap,
-            FIRST_SCANLINE,
-            height,
-            Some(pixels.as_mut_ptr().cast::<c_void>()),
-            &raw mut header,
-            DIB_RGB_COLORS,
-        )
+    let limit = size_px.saturating_mul(OVERSAMPLE).max(1);
+    let fitted = match picture.width() > limit || picture.height() > limit {
+        true => picture.thumbnail(limit, limit),
+        false => picture,
     };
+    let rgba = fitted.to_rgba8();
 
-    // SAFETY: releases the DC taken above.
-    unsafe { ReleaseDC(None, screen) };
+    Some(from_straight_rgba(rgba.width(), rgba.height(), rgba.into_raw()))
+}
 
-    if copied == 0 {
-        return None;
-    }
-
-    premultiply(&mut pixels);
-    Some(IconImage {
+/// Most sources hand back straight alpha; drawing wants it premultiplied.
+pub(crate) fn from_straight_rgba(width: u32, height: u32, mut rgba: Vec<u8>) -> IconImage {
+    premultiply(&mut rgba);
+    IconImage {
         width,
         height,
-        bgra: pixels,
-    })
-}
-
-fn dimensions(bitmap: HBITMAP) -> Option<(u32, u32)> {
-    let mut info = BITMAP::default();
-
-    // SAFETY: the size and pointer describe the same live BITMAP.
-    let written = unsafe {
-        GetObjectW(
-            bitmap.into(),
-            size_of::<BITMAP>() as i32,
-            Some((&raw mut info).cast::<c_void>()),
-        )
-    };
-
-    if written == 0 || info.bmWidth <= 0 || info.bmHeight <= 0 {
-        return None;
+        rgba,
     }
-    Some((info.bmWidth as u32, info.bmHeight as u32))
 }
 
-/// The shell hands back straight alpha; Direct2D wants it premultiplied.
 fn premultiply(pixels: &mut [u8]) {
     let (pixels, _) = pixels.as_chunks_mut::<BYTES_PER_PIXEL>();
     for pixel in pixels {
@@ -185,5 +128,14 @@ mod tests {
 
         assert_eq!(pixels[..ALPHA_OFFSET], [0x80, 0x40, 0x20]);
         assert_eq!(pixels[ALPHA_OFFSET], 0x80);
+    }
+
+    #[test]
+    fn a_missing_picture_has_no_icon() {
+        assert!(
+            IconCache::default()
+                .get("/definitely/not/here.png", 32)
+                .is_none()
+        );
     }
 }

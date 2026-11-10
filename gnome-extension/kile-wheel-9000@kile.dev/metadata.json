@@ -1,0 +1,8 @@
+{
+  "uuid": "kile-wheel-9000@kile.dev",
+  "name": "Kile Wheel 9000",
+  "description": "Lets the kile-wheel-9000 launcher see and focus windows and draw its wheel above them. Does nothing on its own.",
+  "shell-version": ["49", "50"],
+  "version": 1,
+  "url": "https://github.com/kpereira/kile-wheel-9000"
+}

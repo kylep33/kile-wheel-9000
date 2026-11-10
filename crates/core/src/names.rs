@@ -9,23 +9,27 @@ pub const APP_NAME: &str = "kile-wheel-9000";
 pub const DISPLAY_NAME: &str = "Kile Wheel 9000";
 
 /// The settings window, installed beside the wheel.
+#[cfg(windows)]
 pub const SETTINGS_EXE: &str = "kile-wheel-9000-settings.exe";
+#[cfg(not(windows))]
+pub const SETTINGS_EXE: &str = "kile-wheel-9000-settings";
 
 const CONFIG_FILE: &str = "config.toml";
 const ICONS_DIR: &str = "icons";
 const LOGS_DIR: &str = "logs";
 
-/// Everything under `%APPDATA%\<APP_NAME>\`.
+/// Everything under `<config home>/<APP_NAME>/`.
 #[derive(Debug, Clone)]
 pub struct ConfigPaths {
     root: PathBuf,
 }
 
 impl ConfigPaths {
-    /// `roaming_app_data` is `%APPDATA%`, resolved by the platform crate.
-    pub fn new(roaming_app_data: &Path) -> Self {
+    /// `config_home` is the OS's per-user config folder, resolved by the platform crate:
+    /// `%APPDATA%`, `~/.config` or `~/Library/Application Support`.
+    pub fn new(config_home: &Path) -> Self {
         Self {
-            root: roaming_app_data.join(APP_NAME),
+            root: config_home.join(APP_NAME),
         }
     }
 
@@ -57,7 +61,7 @@ mod tests {
 
     #[test]
     fn paths_hang_off_the_app_folder() {
-        let paths = ConfigPaths::new(Path::new(r"C:\Users\someone\AppData\Roaming"));
+        let paths = ConfigPaths::new(Path::new("/home/someone/.config"));
 
         assert!(paths.root().ends_with(APP_NAME));
         assert_eq!(paths.config_file(), paths.root().join("config.toml"));
@@ -67,7 +71,7 @@ mod tests {
 
     #[test]
     fn relative_icons_resolve_under_the_config_folder() {
-        let paths = ConfigPaths::new(Path::new(r"C:\appdata"));
+        let paths = ConfigPaths::new(Path::new("/appdata"));
 
         assert_eq!(
             paths.resolve_icon(Path::new("icons/jira.png")),

@@ -163,7 +163,7 @@ pub fn optional_choice(
 /// An icon field: a preview, the path for typing, and Pick icon for the icons folder.
 ///
 /// `owner` names the field, so with several on one page the picker fills the one that
-/// opened it. Blank means `own_icon`, the icon Windows has for the target.
+/// opened it. Blank means `own_icon`, the icon the desktop has for the target.
 pub fn icon_field(
     ui: &mut egui::Ui,
     picker: &mut IconPicker,

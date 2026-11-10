@@ -1,9 +1,13 @@
 //! Lists the settings window offers to pick from.
 
+//!
+//! Both lists are Windows Terminal and WSL, so they are empty everywhere else, which the
+//! settings window reads as "nothing to offer".
+
 use std::path::PathBuf;
 use std::process::Command;
 
-use crate::known_folders;
+use crate::os::DESKTOP;
 
 /// Windows Terminal keeps its settings under its packaged local state.
 const TERMINAL_SETTINGS: &str =
@@ -12,6 +16,7 @@ const TERMINAL_SETTINGS: &str =
 const WSL_EXE: &str = "wsl.exe";
 
 /// Suppresses the console window `wsl.exe` would otherwise flash up.
+#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Windows Terminal profile names, in the order the file lists them.
@@ -19,6 +24,9 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// Returns an empty list when Windows Terminal is not installed, because a missing
 /// optional app is not an error worth stopping the settings window for.
 pub fn terminal_profiles() -> Vec<String> {
+    if !DESKTOP.has_terminal_profiles {
+        return Vec::new();
+    }
     let Some(path) = terminal_settings_path() else {
         return Vec::new();
     };
@@ -31,6 +39,9 @@ pub fn terminal_profiles() -> Vec<String> {
 
 /// Installed WSL distributions.
 pub fn wsl_distros() -> Vec<String> {
+    if !DESKTOP.has_terminal_profiles {
+        return Vec::new();
+    }
     let Ok(output) = wsl_list() else {
         return Vec::new();
     };
@@ -58,7 +69,7 @@ fn wsl_list() -> std::io::Result<std::process::Output> {
 }
 
 fn terminal_settings_path() -> Option<PathBuf> {
-    let local = known_folders::local_app_data().ok()?;
+    let local = dirs::data_local_dir()?;
     let path = local.join(TERMINAL_SETTINGS);
 
     path.exists().then_some(path)

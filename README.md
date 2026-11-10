@@ -63,3 +63,20 @@ the folder to another machine carries your whole setup with it.
 | `install.ps1 -PrereqsOnly` | install the toolchain and stop |
 | `install.ps1 -SkipPrereqs` | assume the toolchain is there |
 | `install.ps1 -NoStart` | install without launching |
+
+- now runs on Windows 10/11, Ubuntu 26.04 (GNOME on Wayland) and macOS
+- install on Linux or macOS with `./install.sh`, remove with `./uninstall.sh` (`--purge` also deletes the config)
+- `install.sh` takes `--prereqs-only`, `--skip-prereqs` and `--no-start`, same as `install.ps1`
+- config lives in `~/.config/kile-wheel-9000/` on Linux and `~/Library/Application Support/kile-wheel-9000/` on macOS
+- Linux needs the bundled GNOME Shell extension (`gnome-extension/kile-wheel-9000@kile.dev`), which install.sh copies and enables; log out and back in once after the first install
+- Linux reads keys and mice through evdev and replays them through uinput, so install.sh adds you to the `input` group and adds a udev rule for `/dev/uinput` (asks for sudo)
+- touchpads, tablets and touchscreens are not grabbed on Linux, so their buttons cannot be hotkeys
+- the Linux tray icon shows through Ubuntu's AppIndicator extension
+- macOS needs Accessibility access (System Settings, Privacy & Security, Accessibility), and Input Monitoring if it asks
+- macOS installs as `~/Applications/Kile Wheel 9000.app` with a login agent; it is ad-hoc signed so the Accessibility grant survives updates
+- on macOS Caps Lock still toggles caps when it opens the wheel; remap it under Keyboard, Modifier Keys, or bind something else
+- `Win` in a binding means Super on Linux and Cmd on macOS
+- paths in the config use `%VAR%` on Windows and `~` / `$VAR` on Linux and macOS
+- terminal profiles and WSL distros are Windows only; elsewhere a terminal item opens the default terminal in its `cwd`
+- typed snippets on Linux only type plain ASCII; clipboard mode handles anything
+- the wheel is now drawn on the CPU with the same renderer on every OS (tiny-skia + cosmic-text); slice glyphs are Lucide icons in `crates/wheel/assets/glyphs`

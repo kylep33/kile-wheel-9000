@@ -1,16 +1,9 @@
-//! Drawing the petal form.
+//! Layout helpers for drawing the petal form.
 
-use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
-};
-use windows::Win32::Graphics::Direct2D::{
-    D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_SMALL, D2D1_ROUNDED_RECT, D2D1_SWEEP_DIRECTION_CLOCKWISE,
-    D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, ID2D1Factory1, ID2D1PathGeometry1,
-};
-use windows::core::Result;
-use windows_numerics::Vector2;
+use resvg::tiny_skia::Path;
 
-use super::geometry::on_circle;
+use super::geometry::{rounded_rect, tapered_sector};
+use crate::geom::{Point, Rect};
 use crate::form::Petal;
 
 /// Narrow where it leaves the slice, so the join reads as a stem.
@@ -18,57 +11,30 @@ const NECK_TAPER: f32 = 0.45;
 
 /// A neck from the slice out to the panel, built fresh each frame because it moves with
 /// the open animation.
-pub fn neck(factory: &ID2D1Factory1, centre: Vector2, petal: &Petal) -> Result<ID2D1PathGeometry1> {
-    let inner_half = petal.neck_half_span_rad * NECK_TAPER;
-    let outer_half = petal.neck_half_span_rad;
-
-    let inner_start = on_circle(centre, petal.neck_inner_px, petal.bearing_rad - inner_half);
-    let inner_end = on_circle(centre, petal.neck_inner_px, petal.bearing_rad + inner_half);
-    let outer_start = on_circle(centre, petal.neck_outer_px, petal.bearing_rad - outer_half);
-    let outer_end = on_circle(centre, petal.neck_outer_px, petal.bearing_rad + outer_half);
-
-    // SAFETY: the sink is opened, filled and closed before the geometry is returned.
-    unsafe {
-        let geometry = factory.CreatePathGeometry()?;
-        let sink = geometry.Open()?;
-
-        sink.BeginFigure(inner_start, D2D1_FIGURE_BEGIN_FILLED);
-        sink.AddLine(outer_start);
-        sink.AddArc(&arc(
-            outer_end,
-            petal.neck_outer_px,
-            D2D1_SWEEP_DIRECTION_CLOCKWISE,
-        ));
-        sink.AddLine(inner_end);
-        sink.AddArc(&arc(
-            inner_start,
-            petal.neck_inner_px,
-            D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
-        ));
-        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-        sink.Close()?;
-
-        Ok(geometry)
-    }
+pub fn neck(centre: Point, petal: &Petal) -> Option<Path> {
+    tapered_sector(
+        centre,
+        petal.neck_inner_px,
+        petal.neck_outer_px,
+        petal.bearing_rad,
+        petal.neck_half_span_rad * NECK_TAPER,
+        petal.neck_half_span_rad,
+    )
 }
 
-pub fn panel(petal: &Petal) -> D2D1_ROUNDED_RECT {
-    D2D1_ROUNDED_RECT {
-        rect: petal.panel,
-        radiusX: petal.corner_px,
-        radiusY: petal.corner_px,
-    }
+pub fn panel(petal: &Petal) -> Option<Path> {
+    rounded_rect(petal.panel, petal.corner_px)
 }
 
 /// Splits a row into its label and value halves, so the two line up down the form.
-pub fn split_row(row: D2D_RECT_F, label_ratio: f32) -> (D2D_RECT_F, D2D_RECT_F) {
-    let divide = row.left + (row.right - row.left) * label_ratio;
+pub fn split_row(row: Rect, label_ratio: f32) -> (Rect, Rect) {
+    let divide = row.left + row.width() * label_ratio;
 
-    let label = D2D_RECT_F {
+    let label = Rect {
         right: divide,
         ..row
     };
-    let value = D2D_RECT_F {
+    let value = Rect {
         left: divide,
         ..row
     };
@@ -86,10 +52,10 @@ pub fn caret_scroll(caret_px: f32, box_width_px: f32, margin_px: f32) -> f32 {
 }
 
 /// Pulls a box in on both sides, so text does not touch its edges.
-pub fn inset(rect: D2D_RECT_F, by_px: f32) -> D2D_RECT_F {
-    let by_px = by_px.min((rect.right - rect.left) / 2.0).max(0.0);
+pub fn inset(rect: Rect, by_px: f32) -> Rect {
+    let by_px = by_px.min(rect.width() / 2.0).max(0.0);
 
-    D2D_RECT_F {
+    Rect {
         left: rect.left + by_px,
         right: rect.right - by_px,
         ..rect
@@ -98,12 +64,12 @@ pub fn inset(rect: D2D_RECT_F, by_px: f32) -> D2D_RECT_F {
 
 /// The largest square that fits inside `rect` once inset, centred, so an icon keeps its
 /// shape in a tile that is not quite square.
-pub fn square_in(rect: D2D_RECT_F, inset_px: f32) -> D2D_RECT_F {
-    let side = ((rect.right - rect.left).min(rect.bottom - rect.top) - inset_px * 2.0).max(0.0);
+pub fn square_in(rect: Rect, inset_px: f32) -> Rect {
+    let side = (rect.width().min(rect.height()) - inset_px * 2.0).max(0.0);
     let centre_x = (rect.left + rect.right) / 2.0;
     let centre_y = (rect.top + rect.bottom) / 2.0;
 
-    D2D_RECT_F {
+    Rect {
         left: centre_x - side / 2.0,
         top: centre_y - side / 2.0,
         right: centre_x + side / 2.0,
@@ -111,29 +77,11 @@ pub fn square_in(rect: D2D_RECT_F, inset_px: f32) -> D2D_RECT_F {
     }
 }
 
-fn arc(
-    to: Vector2,
-    radius_px: f32,
-    direction: windows::Win32::Graphics::Direct2D::D2D1_SWEEP_DIRECTION,
-) -> D2D1_ARC_SEGMENT {
-    D2D1_ARC_SEGMENT {
-        point: to,
-        size: windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_F {
-            width: radius_px,
-            height: radius_px,
-        },
-        rotationAngle: 0.0,
-        sweepDirection: direction,
-        // the neck is a sliver of a turn, so the short way round is always right
-        arcSize: D2D1_ARC_SIZE_SMALL,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ROW: D2D_RECT_F = D2D_RECT_F {
+    const ROW: Rect = Rect {
         left: 100.0,
         top: 10.0,
         right: 300.0,
@@ -186,8 +134,8 @@ mod tests {
     fn a_square_fits_the_short_side_and_stays_centred() {
         let square = square_in(ROW, 2.0);
 
-        assert_eq!(square.right - square.left, 16.0);
-        assert_eq!(square.bottom - square.top, 16.0);
+        assert_eq!(square.width(), 16.0);
+        assert_eq!(square.height(), 16.0);
         assert_eq!((square.left + square.right) / 2.0, 200.0);
     }
 

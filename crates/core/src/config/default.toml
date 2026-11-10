@@ -1,14 +1,15 @@
 # kile-wheel-9000 config.
 #
 # Edit by hand or through the settings window; comments here survive either way.
-# Paths may use environment variables such as %USERPROFILE%.
+# Paths may use environment variables, written the way this OS writes them.
 # Icon paths are relative to this folder, so copying the folder moves your setup.
 
 [general]
+# managed by the installer, which adds or removes the login entry
 start_with_windows = true
 # ignore hotkeys while a fullscreen app has focus
 disable_in_fullscreen = true
-# activating the app that already has focus minimizes it, like the taskbar
+# activating the app that already has focus minimizes it, like the taskbar or dock
 minimize_if_focused = true
 show_clock = true
 
@@ -19,7 +20,8 @@ show_clock = true
 binding = "CapsLock"
 action = "toggle"
 
-# Alt+Shift is the Windows keyboard-layout switch. Binding it here stops that working.
+# Modifiers are Ctrl, Alt, Shift and Win; Win is Super on Linux and Cmd on macOS.
+# Binding a combo the desktop already uses takes it over.
 # [[hotkeys]]
 # binding = "Alt+Shift"
 # action = "toggle"
@@ -52,7 +54,8 @@ empty_quips = [
     "room for rent",
     "insert app here",
 ]
-# running apps that never take an unpinned slot, by exe name, for things like status bars
+# running apps that never take an unpinned slot, by executable name, for things like
+# status bars
 hidden_apps = ["komorebi-bar.exe"]
 
 # Up to nine tabs, numbered 1 to 9 and selected with the number keys.
@@ -67,12 +70,12 @@ name = "Main"
 # you mark as "unpinned_app"; every other slot stays blank until you fill it.
 #
 # type = "unpinned_app"  a slot held open for whatever is running, filled by the wheel
-# type = "app"           target = an exe, a shortcut, or shell:AppsFolder\<AppUserModelID>
+# type = "app"           target = what starts the app (see the examples below)
 # type = "script"        path + exec, where {path} is replaced with path
 # type = "url"           url + optional browser and browser_args
 # type = "snippet"       text, mode = "clipboard" or "type"
-# type = "folder"        path, opened in Explorer
-# type = "terminal"      profile + optional distro and cwd
+# type = "folder"        path, opened in the file manager
+# type = "terminal"      optional cwd; on Windows also profile and distro
 #
 # Snippets are stored here as plain text, so keep secrets out of them.
 
@@ -83,42 +86,3 @@ name = "Main"
 # name = "Open"
 # tab = 1
 # slot = 4
-
-# [[items]]
-# type = "app"
-# name = "VS Code"
-# target = "%LOCALAPPDATA%\\Programs\\Microsoft VS Code\\Code.exe"
-# tab = 1
-# slot = 0
-
-# [[items]]
-# type = "url"
-# name = "Jira"
-# url = "https://example.atlassian.net"
-# browser = "msedge.exe"
-# tab = 1
-# slot = 2
-
-# [[items]]
-# type = "script"
-# name = "Deploy"
-# path = "%USERPROFILE%\\scripts\\deploy.sh"
-# exec = "wt.exe -- \"C:\\Program Files\\Git\\bin\\bash.exe\" \"{path}\""
-# tab = 1
-# slot = 4
-
-# [[items]]
-# type = "folder"
-# name = "Projects"
-# path = "%USERPROFILE%\\projects"
-# tab = 1
-# slot = 6
-
-# [[items]]
-# type = "terminal"
-# name = "Ubuntu"
-# profile = "Ubuntu"
-# distro = "Ubuntu"
-# cwd = "~"
-# tab = 1
-# slot = 7

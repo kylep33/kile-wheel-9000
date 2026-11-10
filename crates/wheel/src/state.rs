@@ -2,7 +2,7 @@
 
 use kile_wheel_core::select::Held;
 use kile_wheel_core::slot::{Cardinal, Slot, Tab};
-use windows::Win32::Foundation::HWND;
+use kile_wheel_platform::apps::WindowId;
 
 use crate::anim::Animation;
 use crate::slots::NewWindow;
@@ -10,7 +10,7 @@ use crate::slots::NewWindow;
 /// One window of an app that has more than one open.
 #[derive(Debug, Clone)]
 pub struct WindowChoice {
-    pub handle: HWND,
+    pub handle: WindowId,
     pub title: String,
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "kile-wheel-platform"
-description = "Win32 plumbing for kile-wheel-9000."
+description = "OS plumbing for kile-wheel-9000: one API, a backend per desktop."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,8 +10,34 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+dirs.workspace = true
+image.workspace = true
 kile-wheel-core.workspace = true
 notify.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+tray-icon.workspace = true
 windows.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+rfd.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-app-kit.workspace = true
+objc2-application-services.workspace = true
+objc2-core-foundation.workspace = true
+objc2-core-graphics.workspace = true
+objc2-foundation.workspace = true
+objc2-quartz-core.workspace = true
+tray-icon.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev.workspace = true
+ksni.workspace = true
+resvg.workspace = true
+serde.workspace = true
+zbus.workspace = true
