@@ -17,8 +17,23 @@ use crate::binding::{Action, Binding, BindingTable, Hotkey, ParseBindingError};
 use crate::item::{Item, Position};
 use crate::slot::{Slot, Tab};
 
-/// Written on first run. Commented, because it doubles as the documentation.
-pub const DEFAULT_CONFIG: &str = include_str!("default.toml");
+/// Written on first run. Commented, because it doubles as the documentation. The
+/// examples at the end are in this OS's own paths and programs.
+#[cfg(target_os = "windows")]
+pub const DEFAULT_CONFIG: &str = concat!(
+    include_str!("default.toml"),
+    include_str!("examples_windows.toml")
+);
+#[cfg(target_os = "linux")]
+pub const DEFAULT_CONFIG: &str = concat!(
+    include_str!("default.toml"),
+    include_str!("examples_linux.toml")
+);
+#[cfg(target_os = "macos")]
+pub const DEFAULT_CONFIG: &str = concat!(
+    include_str!("default.toml"),
+    include_str!("examples_macos.toml")
+);
 
 /// Accent colour used when the config does not name a readable one.
 const FALLBACK_ACCENT: Rgb = Rgb {
@@ -468,14 +483,14 @@ mod tests {
         let config: Config = toml::from_str("[wheel]\nsize = 1.0\n").expect("parses");
 
         assert!(config.wheel.hides(std::path::Path::new(
-            r"C:\Program Files\komorebi\bin\komorebi-bar.exe"
+            "/Program Files/komorebi/bin/komorebi-bar.exe"
         )));
     }
 
     #[test]
     fn a_hidden_app_matches_by_name_stem_or_path_whatever_the_case() {
-        let path = std::path::Path::new(r"C:\Tools\Status-Bar.EXE");
-        for entry in ["status-bar.exe", "STATUS-BAR", r"c:\tools\status-bar.exe"] {
+        let path = std::path::Path::new("/Tools/Status-Bar.EXE");
+        for entry in ["status-bar.exe", "STATUS-BAR", "/tools/status-bar.exe"] {
             let settings = WheelSettings {
                 hidden_apps: vec![entry.to_owned()],
                 ..WheelSettings::default()
@@ -486,7 +501,7 @@ mod tests {
 
     #[test]
     fn an_empty_list_hides_nothing_and_a_blank_entry_matches_nothing() {
-        let path = std::path::Path::new(r"C:\Tools\app.exe");
+        let path = std::path::Path::new("/Tools/app.exe");
         let settings = WheelSettings {
             hidden_apps: vec![String::new(), "   ".to_owned(), "other.exe".to_owned()],
             ..WheelSettings::default()

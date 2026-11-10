@@ -1,4 +1,4 @@
-//! Embeds the win32 manifest.
+//! Embeds the win32 manifest on Windows. Other targets need nothing at link time.
 //!
 //! Elevation and DPI awareness both have to be settled before the process starts, so
 //! they live in a manifest rather than in a call at startup.
@@ -10,8 +10,15 @@ const MANIFEST_FILE: &str = "kile-wheel-9000.manifest";
 fn main() {
     let crate_dir = std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");
     let manifest = Path::new(&crate_dir).join(MANIFEST_FILE);
-
     println!("cargo::rerun-if-changed={}", manifest.display());
+
+    // the target, not the host, decides: a cross build from Windows must not get these
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os != "windows" || target_env != "msvc" {
+        return;
+    }
+
     println!("cargo::rustc-link-arg-bins=/MANIFEST:EMBED");
     println!(
         "cargo::rustc-link-arg-bins=/MANIFESTINPUT:{}",

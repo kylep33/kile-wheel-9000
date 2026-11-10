@@ -4,10 +4,10 @@
 //! monitor DPI both scale the whole thing by one multiplier.
 
 use kile_wheel_core::config::Rgb;
-use kile_wheel_platform::monitor::USER_DEFAULT_DPI;
-use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 
-/// Wheel diameter at 100% scale on a 96 dpi monitor.
+use crate::render::Glyph;
+
+/// Wheel diameter at 100% size on an unscaled display.
 const BASE_DIAMETER_PX: f32 = 620.0;
 
 /// Room around the wheel for the ring stroke and the selected wedge's glow.
@@ -46,33 +46,33 @@ const NOTE_LINE_RATIO: f32 = 2.0;
 
 const FULL_CHANNEL: f32 = 255.0;
 
+/// The desktop's own UI font, so the wheel looks native. Missing families fall back to
+/// whatever sans serif the system has.
+#[cfg(target_os = "windows")]
 pub const LABEL_FONT: &str = "Segoe UI";
-pub const ICON_FONT: &str = "Segoe MDL2 Assets";
-pub const LOCALE: &str = "en-us";
+#[cfg(target_os = "macos")]
+pub const LABEL_FONT: &str = "Helvetica Neue";
+#[cfg(target_os = "linux")]
+pub const LABEL_FONT: &str = "Ubuntu Sans";
 
-/// Settings gear in Segoe MDL2 Assets.
-pub const COG_GLYPH: &str = "\u{E713}";
+pub const COG_GLYPH: Glyph = Glyph::Cog;
 
-/// Mini glyph per slot type, in `ItemKind::NAMES` order. Segoe MDL2 Assets codepoints,
-/// listed so they are easy to swap.
-pub const TYPE_GLYPHS: [&str; 7] = [
-    "\u{E7C4}", // unpinned app slot: switch apps
-    "\u{E718}", // pinned app: pin
-    "\u{E943}", // script: code
-    "\u{E774}", // url: globe
-    "\u{E77F}", // snippet: paste
-    "\u{E8B7}", // folder
-    "\u{E756}", // terminal: command prompt
+/// Mini glyph per slot type, in `ItemKind::NAMES` order.
+pub const TYPE_GLYPHS: [Glyph; 7] = [
+    Glyph::UnpinnedApp,
+    Glyph::App,
+    Glyph::Script,
+    Glyph::Url,
+    Glyph::Snippet,
+    Glyph::Folder,
+    Glyph::Terminal,
 ];
 
 /// Marks the sub-wheel slice that opens one more window of an app.
-pub const NEW_WINDOW_GLYPH: &str = "\u{E710}";
+pub const NEW_WINDOW_GLYPH: Glyph = Glyph::NewWindow;
 
 /// Shown in the hub when more apps are running than there are unpinned slots.
-pub const OVERFLOW_GLYPH: &str = "\u{E946}";
-
-/// Shown on a slice in edit mode, to clear the slot.
-pub const DELETE_GLYPH: &str = "\u{E74D}";
+pub const OVERFLOW_GLYPH: Glyph = Glyph::Overflow;
 
 /// Shown on the hub while edit mode is on.
 pub const EDIT_LABEL: &str = "EDIT";
@@ -102,8 +102,9 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    pub fn new(dpi: u32, size_scale: f32) -> Self {
-        let scale = (dpi as f32 / USER_DEFAULT_DPI as f32) * size_scale;
+    /// `ui_scale` is the display's scaling, 1.0 at 100%; `size_scale` is the size setting.
+    pub fn new(ui_scale: f32, size_scale: f32) -> Self {
+        let scale = ui_scale * size_scale;
         let radius_px = BASE_DIAMETER_PX * scale / 2.0;
 
         Self {
@@ -174,23 +175,31 @@ impl Metrics {
     }
 }
 
+/// Straight (not premultiplied) colour, each channel 0 to 1.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Colour {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
+}
+
 /// Every colour the wheel draws with, tinted by the configured accent.
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
-    pub backdrop: D2D1_COLOR_F,
-    pub ring: D2D1_COLOR_F,
-    pub divider: D2D1_COLOR_F,
-    pub wedge: D2D1_COLOR_F,
-    pub wedge_selected: D2D1_COLOR_F,
-    pub hub: D2D1_COLOR_F,
-    pub label: D2D1_COLOR_F,
-    pub label_selected: D2D1_COLOR_F,
-    pub label_empty: D2D1_COLOR_F,
-    pub number: D2D1_COLOR_F,
-    pub accent: D2D1_COLOR_F,
-    pub accent_dim: D2D1_COLOR_F,
-    pub running: D2D1_COLOR_F,
-    pub transparent: D2D1_COLOR_F,
+    pub backdrop: Colour,
+    pub ring: Colour,
+    pub divider: Colour,
+    pub wedge: Colour,
+    pub wedge_selected: Colour,
+    pub hub: Colour,
+    pub label: Colour,
+    pub label_selected: Colour,
+    pub label_empty: Colour,
+    pub number: Colour,
+    pub accent: Colour,
+    pub accent_dim: Colour,
+    pub running: Colour,
 }
 
 impl Palette {
@@ -211,7 +220,6 @@ impl Palette {
             accent,
             accent_dim: fade(accent, 0.45),
             running: grey(0xE8, 0.95),
-            transparent: grey(0x00, 0.0),
         }
         .with_opacity(opacity)
     }
@@ -222,11 +230,10 @@ impl Palette {
         for colour in self.each_mut() {
             colour.a *= opacity;
         }
-        self.transparent.a = 0.0;
         self
     }
 
-    fn each_mut(&mut self) -> [&mut D2D1_COLOR_F; 13] {
+    fn each_mut(&mut self) -> [&mut Colour; 13] {
         [
             &mut self.backdrop,
             &mut self.ring,
@@ -245,7 +252,7 @@ impl Palette {
     }
 }
 
-fn grey(level: u8, alpha: f32) -> D2D1_COLOR_F {
+fn grey(level: u8, alpha: f32) -> Colour {
     from_rgb(
         Rgb {
             red: level,
@@ -256,8 +263,8 @@ fn grey(level: u8, alpha: f32) -> D2D1_COLOR_F {
     )
 }
 
-fn from_rgb(colour: Rgb, alpha: f32) -> D2D1_COLOR_F {
-    D2D1_COLOR_F {
+fn from_rgb(colour: Rgb, alpha: f32) -> Colour {
+    Colour {
         r: f32::from(colour.red) / FULL_CHANNEL,
         g: f32::from(colour.green) / FULL_CHANNEL,
         b: f32::from(colour.blue) / FULL_CHANNEL,
@@ -265,20 +272,21 @@ fn from_rgb(colour: Rgb, alpha: f32) -> D2D1_COLOR_F {
     }
 }
 
-fn fade(colour: D2D1_COLOR_F, alpha: f32) -> D2D1_COLOR_F {
-    D2D1_COLOR_F { a: alpha, ..colour }
+fn fade(colour: Colour, alpha: f32) -> Colour {
+    Colour { a: alpha, ..colour }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const DOUBLE_DPI: u32 = USER_DEFAULT_DPI * 2;
+    const UNSCALED: f32 = 1.0;
+    const DOUBLED: f32 = 2.0;
 
     #[test]
-    fn doubling_the_dpi_doubles_every_size() {
-        let normal = Metrics::new(USER_DEFAULT_DPI, 1.0);
-        let doubled = Metrics::new(DOUBLE_DPI, 1.0);
+    fn doubling_the_display_scale_doubles_every_size() {
+        let normal = Metrics::new(UNSCALED, 1.0);
+        let doubled = Metrics::new(DOUBLED, 1.0);
 
         assert_eq!(doubled.radius_px, normal.radius_px * 2.0);
         assert_eq!(doubled.hub_radius_px, normal.hub_radius_px * 2.0);
@@ -286,16 +294,16 @@ mod tests {
     }
 
     #[test]
-    fn the_size_setting_scales_the_same_way_as_dpi() {
-        let scaled = Metrics::new(USER_DEFAULT_DPI, 2.0);
-        let doubled_dpi = Metrics::new(DOUBLE_DPI, 1.0);
+    fn the_size_setting_scales_the_same_way_as_the_display() {
+        let scaled = Metrics::new(UNSCALED, 2.0);
+        let doubled_display = Metrics::new(DOUBLED, 1.0);
 
-        assert_eq!(scaled.radius_px, doubled_dpi.radius_px);
+        assert_eq!(scaled.radius_px, doubled_display.radius_px);
     }
 
     #[test]
     fn radii_stay_in_the_order_they_are_drawn() {
-        let metrics = Metrics::new(USER_DEFAULT_DPI, 1.0);
+        let metrics = Metrics::new(UNSCALED, 1.0);
 
         assert!(metrics.hub_radius_px < metrics.number_radius_px);
         assert!(metrics.number_radius_px < metrics.pin_radius_px);
@@ -308,7 +316,7 @@ mod tests {
     /// cover the furthest one can reach.
     #[test]
     fn the_window_covers_the_furthest_a_petal_reaches() {
-        let metrics = Metrics::new(USER_DEFAULT_DPI, 1.0);
+        let metrics = Metrics::new(UNSCALED, 1.0);
         let reach = metrics.radius_px * crate::form::PETAL_MAX_REACH_RATIO;
 
         assert!(metrics.window_size_px() as f32 >= reach * 2.0);
@@ -316,13 +324,13 @@ mod tests {
 
     #[test]
     fn the_dead_zone_matches_the_hub() {
-        let metrics = Metrics::new(USER_DEFAULT_DPI, 1.0);
+        let metrics = Metrics::new(UNSCALED, 1.0);
 
         assert_eq!(metrics.dead_zone_px(), metrics.hub_radius_px);
     }
 
     #[test]
-    fn the_opacity_setting_scales_alpha_but_leaves_transparent_clear() {
+    fn the_opacity_setting_scales_alpha() {
         let accent = Rgb {
             red: 0xD8,
             green: 0xB3,
@@ -332,7 +340,6 @@ mod tests {
         let half = Palette::new(accent, 0.5);
 
         assert_eq!(half.backdrop.a, solid.backdrop.a * 0.5);
-        assert_eq!(half.transparent.a, 0.0);
     }
 
     #[test]

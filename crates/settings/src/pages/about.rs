@@ -19,10 +19,10 @@ pub fn draw(settings: &mut Settings, ui: &mut egui::Ui) {
     });
     super::row(ui, "", |ui| {
         if ui.button("Open config folder").clicked() {
-            open(&root);
+            open(settings, &root);
         }
         if ui.button("Open config.toml").clicked() {
-            open(&config_file);
+            open(settings, &config_file);
         }
     });
 
@@ -45,11 +45,9 @@ pub fn draw(settings: &mut Settings, ui: &mut egui::Ui) {
     ui.label("  Hold 400ms       toggle edit mode, then drag slots around");
 }
 
-/// Hands the path to the shell rather than guessing at an editor.
-fn open(path: &std::path::Path) {
-    let command = kile_wheel_platform::shell::Command::new("explorer.exe")
-        .with_arguments(Some(format!("\"{}\"", path.display())));
-
-    // this window is already unelevated, so a plain shell launch is fine here
-    let _ = kile_wheel_platform::shell::execute(&command);
+/// Hands the path to the desktop rather than guessing at an editor.
+fn open(settings: &mut Settings, path: &std::path::Path) {
+    if let Err(error) = kile_wheel_platform::process::open(&path.to_string_lossy()) {
+        settings.status = Some(format!("{error}"));
+    }
 }

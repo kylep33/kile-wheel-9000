@@ -12,11 +12,10 @@ use kile_wheel_core::names::ConfigPaths;
 use kile_wheel_core::slot::{Slot, Tab};
 #[cfg(test)]
 use kile_wheel_platform::apps::WindowRef;
-use kile_wheel_platform::apps::{AppGroup, AppKey, WindowModel};
+use kile_wheel_platform::apps::{self, AppGroup, AppKey, WindowId, WindowModel};
 use kile_wheel_platform::icon_files;
 use kile_wheel_platform::identity::{AppIdentity, IdentityCache};
 use kile_wheel_platform::paths::expand;
-use windows::Win32::Foundation::HWND;
 
 /// What activating a slot does.
 #[derive(Debug, Clone)]
@@ -38,7 +37,7 @@ pub struct SlotEntry {
     /// The configured type, which is what picks the slice's mini glyph.
     pub kind: ItemKind,
     pub target: SlotTarget,
-    pub windows: Vec<HWND>,
+    pub windows: Vec<WindowId>,
     pub focused: bool,
 }
 
@@ -83,15 +82,9 @@ pub struct NewWindow {
     pub launch: ItemKind,
 }
 
-/// What the shell launches a running app by.
-///
-/// Packaged apps go through the Apps folder, because their executable path is not what
-/// starts them.
+/// What the desktop launches a running app by.
 pub fn launch_target(key: &AppKey) -> String {
-    match key {
-        AppKey::Executable(path) => path.to_string_lossy().into_owned(),
-        AppKey::UserModelId(id) => format!(r"shell:AppsFolder\{id}"),
-    }
+    apps::launch_target(key)
 }
 
 /// Every tab's slots, resolved for one open.
@@ -206,7 +199,7 @@ fn unpinned_entry(
         icon_source: Some(icon_path(group.key)),
         kind: ItemKind::UnpinnedApp,
         target: SlotTarget::Running(group.key.clone()),
-        windows: group.windows.iter().map(|window| window.handle).collect(),
+        windows: group.windows.iter().map(|window| window.id).collect(),
         focused: focused == Some(group.key),
     }
 }
@@ -237,7 +230,7 @@ fn pinned_entry(
         target: SlotTarget::Pinned(item.clone()),
         windows: owned
             .iter()
-            .flat_map(|group| group.windows.iter().map(|window| window.handle))
+            .flat_map(|group| group.windows.iter().map(|window| window.id))
             .collect(),
         focused: owned.iter().any(|group| focused == Some(group.key)),
     }
@@ -260,7 +253,7 @@ pub fn is_hidden(config: &Config, group: &AppGroup<'_>) -> bool {
     let executable = match (group.executable, group.key) {
         (Some(path), _) => path,
         (None, AppKey::Executable(path)) => path.as_path(),
-        (None, AppKey::UserModelId(_)) => return false,
+        (None, AppKey::Id(_)) => return false,
     };
     config.wheel.hides(executable)
 }
@@ -288,16 +281,20 @@ fn resolve_icon(paths: &ConfigPaths, source: &str) -> String {
 
 /// Slot labels mirror the taskbar: the app, not the window title.
 ///
-/// The executable is preferred over the grouping key, because a packaged-app id often
-/// carries a profile suffix and reads badly, as in `MSEdge.UserData.Profile2`.
+/// The desktop's own app name wins where there is one. Otherwise the executable is
+/// preferred over the grouping key, because a packaged-app id often carries a profile
+/// suffix and reads badly, as in `MSEdge.UserData.Profile2`.
 pub fn group_label(group: &AppGroup<'_>) -> String {
+    if let Some(name) = group.name.filter(|name| !name.is_empty()) {
+        return name.to_owned();
+    }
     if let Some(stem) = group.executable.and_then(Path::file_stem) {
         return stem.to_string_lossy().into_owned();
     }
 
     match group.key {
         AppKey::Executable(path) => path.display().to_string(),
-        AppKey::UserModelId(id) => match id.rsplit_once('!') {
+        AppKey::Id(id) => match id.rsplit_once('!') {
             Some((_, app)) => app.to_owned(),
             None => id.clone(),
         },
@@ -334,8 +331,32 @@ mod tests {
         AppGroup {
             key,
             executable,
+            name: None,
             windows: Vec::new(),
         }
+    }
+
+    fn window(id: u64) -> WindowRef<'static> {
+        WindowRef {
+            id: WindowId(id),
+            title: "",
+        }
+    }
+
+    fn running<'a>(key: &'a AppKey, executable: Option<&'a Path>, ids: &[u64]) -> AppGroup<'a> {
+        AppGroup {
+            key,
+            executable,
+            name: None,
+            windows: ids.iter().map(|id| window(*id)).collect(),
+        }
+    }
+
+    fn identity(item: &Item) -> Option<AppIdentity> {
+        let ItemKind::App { target } = &item.kind else {
+            return None;
+        };
+        Some(AppIdentity::unresolved(target))
     }
 
     #[test]
@@ -355,7 +376,7 @@ mod tests {
     #[test]
     fn pinned_entries_are_not_unpinned_slots() {
         let config = Config {
-            items: vec![app_item("Code", "code.exe", 1, 0), unpinned(1, 1)],
+            items: vec![app_item("Code", "code", 1, 0), unpinned(1, 1)],
             ..Config::default()
         };
 
@@ -367,37 +388,11 @@ mod tests {
         assert!(unpinned_slots(&Config::default()).is_empty());
     }
 
-    fn window(handle: isize) -> WindowRef<'static> {
-        WindowRef {
-            handle: HWND(handle as *mut _),
-            title: "",
-        }
-    }
-
-    fn running<'a>(
-        key: &'a AppKey,
-        executable: Option<&'a Path>,
-        handles: &[isize],
-    ) -> AppGroup<'a> {
-        AppGroup {
-            key,
-            executable,
-            windows: handles.iter().map(|handle| window(*handle)).collect(),
-        }
-    }
-
-    fn identity(item: &Item) -> Option<AppIdentity> {
-        let ItemKind::App { target } = &item.kind else {
-            return None;
-        };
-        Some(AppIdentity::unresolved(target))
-    }
-
     #[test]
     fn a_hidden_app_is_known_by_its_executable() {
         let config = Config::default();
-        let bar = AppKey::Executable(r"C:\komorebi\bin\komorebi-bar.exe".into());
-        let code = AppKey::Executable(r"C:\Apps\Code.exe".into());
+        let bar = AppKey::Executable("/komorebi/bin/komorebi-bar.exe".into());
+        let code = AppKey::Executable("/apps/Code.exe".into());
 
         assert!(is_hidden(&config, &group(&bar, None)));
         assert!(!is_hidden(&config, &group(&code, None)));
@@ -407,17 +402,17 @@ mod tests {
     #[test]
     fn a_hidden_app_grouped_by_id_is_known_through_its_executable() {
         let config = Config::default();
-        let key = AppKey::UserModelId("Some.Bar".to_owned());
-        let exe = Path::new(r"C:\komorebi\bin\komorebi-bar.exe");
+        let key = AppKey::Id("Some.Bar".to_owned());
+        let exe = Path::new("/komorebi/bin/komorebi-bar.exe");
 
         assert!(is_hidden(&config, &group(&key, Some(exe))));
         assert!(!is_hidden(&config, &group(&key, None)));
     }
 
     #[test]
-    fn a_pinned_app_claims_its_running_group_whatever_the_case() {
-        let item = app_item("Code", r"C:\Apps\Code.exe", 1, 0);
-        let key = AppKey::Executable(r"c:\apps\code.exe".into());
+    fn a_pinned_app_claims_its_running_group() {
+        let item = app_item("Code", "/apps/Code", 1, 0);
+        let key = AppKey::Executable("/apps/Code".into());
 
         let identity = identity(&item).expect("an app has an identity");
         assert!(claims(&identity, &group(&key, None)));
@@ -425,22 +420,17 @@ mod tests {
 
     #[test]
     fn a_pinned_app_does_not_claim_a_different_executable() {
-        let item = app_item("Code", r"C:\Apps\Code.exe", 1, 0);
-        let key = AppKey::Executable(r"C:\Apps\Other.exe".into());
+        let item = app_item("Code", "/apps/Code", 1, 0);
+        let key = AppKey::Executable("/apps/Other".into());
 
         let identity = identity(&item).expect("an app has an identity");
         assert!(!claims(&identity, &group(&key, None)));
     }
 
     #[test]
-    fn a_pinned_packaged_app_claims_its_group_by_user_model_id() {
-        let item = app_item(
-            "Terminal",
-            "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App",
-            1,
-            0,
-        );
-        let key = AppKey::UserModelId("Microsoft.WindowsTerminal_8wekyb3d8bbwe!App".to_owned());
+    fn a_pinned_app_claims_its_group_by_app_id() {
+        let item = app_item("Terminal", "org.example.Terminal", 1, 0);
+        let key = AppKey::Id("org.example.Terminal".to_owned());
 
         let identity = identity(&item).expect("an app has an identity");
         assert!(claims(&identity, &group(&key, None)));
@@ -457,24 +447,24 @@ mod tests {
     /// them instead of starting yet another copy.
     #[test]
     fn a_pinned_app_collects_its_running_windows() {
-        let item = app_item("Code", r"C:\Apps\Code.exe", 1, 0);
-        let code = AppKey::Executable(r"C:\Apps\Code.exe".into());
-        let other = AppKey::Executable(r"C:\Apps\Other.exe".into());
+        let item = app_item("Code", "/apps/Code", 1, 0);
+        let code = AppKey::Executable("/apps/Code".into());
+        let other = AppKey::Executable("/apps/Other".into());
         let groups = [running(&code, None, &[1, 2]), running(&other, None, &[3])];
 
         let entry = pinned_entry(&item, identity(&item).as_ref(), &groups, Some(&code));
 
-        assert_eq!(entry.windows, [window(1).handle, window(2).handle]);
+        assert_eq!(entry.windows, [WindowId(1), WindowId(2)]);
         assert!(entry.focused);
     }
 
     /// One pin can stand for several groups, as Chrome does with a group per profile.
     #[test]
     fn a_pinned_app_collects_windows_from_every_group_it_claims() {
-        let item = app_item("Chrome", r"C:\Chrome\chrome.exe", 1, 0);
-        let exe = Path::new(r"C:\Chrome\chrome.exe");
-        let first = AppKey::UserModelId("Chrome".to_owned());
-        let second = AppKey::UserModelId("Chrome.UserData.Profile2".to_owned());
+        let item = app_item("Chrome", "/chrome/chrome", 1, 0);
+        let exe = Path::new("/chrome/chrome");
+        let first = AppKey::Id("Chrome".to_owned());
+        let second = AppKey::Id("Chrome.UserData.Profile2".to_owned());
         let groups = [
             running(&first, Some(exe), &[1]),
             running(&second, Some(exe), &[2]),
@@ -487,8 +477,8 @@ mod tests {
 
     #[test]
     fn a_pinned_app_that_is_not_running_has_no_windows() {
-        let item = app_item("Code", r"C:\Apps\Code.exe", 1, 0);
-        let other = AppKey::Executable(r"C:\Apps\Other.exe".into());
+        let item = app_item("Code", "/apps/Code", 1, 0);
+        let other = AppKey::Executable("/apps/Other".into());
         let groups = [running(&other, None, &[3])];
 
         let entry = pinned_entry(&item, identity(&item).as_ref(), &groups, None);
@@ -499,7 +489,7 @@ mod tests {
 
     #[test]
     fn a_pinned_app_offers_a_new_window_through_its_own_target() {
-        let item = app_item("Kiro", r"C:\pins\Kiro.lnk", 1, 0);
+        let item = app_item("Kiro", "/pins/Kiro.lnk", 1, 0);
         let entry = pinned_entry(&item, identity(&item).as_ref(), &[], None);
 
         let new = entry.new_window().expect("an app can open another window");
@@ -509,7 +499,7 @@ mod tests {
 
     #[test]
     fn a_running_app_offers_a_new_window_through_its_launch_target() {
-        let key = AppKey::UserModelId("Some.App_abc!App".to_owned());
+        let key = AppKey::Executable("/apps/Code".into());
         let entry = unpinned_entry(
             Position {
                 tab: Tab::FIRST,
@@ -527,7 +517,7 @@ mod tests {
 
         let entry = SlotEntry {
             label: "App".to_owned(),
-            target: SlotTarget::Running(key),
+            target: SlotTarget::Running(key.clone()),
             ..entry
         };
         let new = entry
@@ -536,7 +526,7 @@ mod tests {
         assert_eq!(
             new.launch,
             ItemKind::App {
-                target: r"shell:AppsFolder\Some.App_abc!App".to_owned()
+                target: launch_target(&key)
             }
         );
     }
@@ -562,7 +552,7 @@ mod tests {
 
     #[test]
     fn a_configured_icon_wins_over_the_automatic_one() {
-        let mut item = app_item("Code", r"C:\Apps\Code.exe", 1, 0);
+        let mut item = app_item("Code", "/apps/Code", 1, 0);
         item.icon = Some("icons/code.png".to_owned());
 
         assert_eq!(icon_source(&item).as_deref(), Some("icons/code.png"));
@@ -570,30 +560,20 @@ mod tests {
 
     #[test]
     fn without_a_configured_icon_the_target_is_used() {
-        let item = app_item("Code", r"C:\Apps\Code.exe", 1, 0);
+        let item = app_item("Code", "/apps/Code", 1, 0);
 
-        assert_eq!(icon_source(&item).as_deref(), Some(r"C:\Apps\Code.exe"));
+        assert_eq!(icon_source(&item).as_deref(), Some("/apps/Code"));
     }
 
     /// The resolved path is the key the icon is uploaded and drawn under, so both must
     /// agree on it.
     #[test]
     fn a_configured_icon_resolves_under_the_config_folder() {
-        let paths = ConfigPaths::new(Path::new(r"C:\appdata"));
+        let paths = ConfigPaths::new(Path::new("/appdata"));
 
         assert_eq!(
-            resolve_icon(&paths, r"icons\xp\233.ico"),
-            paths.root().join(r"icons\xp\233.ico").to_string_lossy()
-        );
-    }
-
-    #[test]
-    fn an_absolute_icon_source_passes_through() {
-        let paths = ConfigPaths::new(Path::new(r"C:\appdata"));
-
-        assert_eq!(
-            resolve_icon(&paths, r"C:\Apps\Code.exe"),
-            r"C:\Apps\Code.exe"
+            resolve_icon(&paths, "icons/xp/233.ico"),
+            paths.root().join("icons/xp/233.ico").to_string_lossy()
         );
     }
 
@@ -604,31 +584,55 @@ mod tests {
 
     #[test]
     fn an_executable_is_labelled_by_its_file_stem() {
-        let key = AppKey::Executable(r"C:\Apps\Code.exe".into());
-        let path = Path::new(r"C:\Apps\Code.exe");
+        let key = AppKey::Executable("/apps/Code.exe".into());
+        let path = Path::new("/apps/Code.exe");
 
         assert_eq!(group_label(&group(&key, Some(path))), "Code");
+    }
+
+    /// GNOME and macOS know each app's real name, which reads better than any exe.
+    #[test]
+    fn the_desktop_name_wins_over_the_executable() {
+        let key = AppKey::Id("org.gnome.Nautilus.desktop".to_owned());
+        let path = Path::new("/usr/bin/nautilus");
+        let named = AppGroup {
+            name: Some("Files"),
+            ..group(&key, Some(path))
+        };
+
+        assert_eq!(group_label(&named), "Files");
     }
 
     /// The whole reason the executable is carried alongside the grouping key.
     #[test]
     fn a_packaged_app_prefers_its_executable_over_its_id() {
-        let key = AppKey::UserModelId("MSEdge.UserData.Profile2".to_owned());
-        let path = Path::new(r"C:\Program Files\Edge\msedge.exe");
+        let key = AppKey::Id("MSEdge.UserData.Profile2".to_owned());
+        let path = Path::new("/edge/msedge.exe");
 
         assert_eq!(group_label(&group(&key, Some(path))), "msedge");
     }
 
     #[test]
     fn without_an_executable_the_id_is_trimmed_at_the_bang() {
-        let key = AppKey::UserModelId("Microsoft.WindowsTerminal_8wekyb3d8bbwe!App".to_owned());
+        let key = AppKey::Id("Microsoft.WindowsTerminal_8wekyb3d8bbwe!App".to_owned());
 
         assert_eq!(group_label(&group(&key, None)), "App");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a_pinned_windows_app_claims_its_group_whatever_the_case() {
+        let item = app_item("Code", r"C:\Apps\Code.exe", 1, 0);
+        let key = AppKey::Executable(r"c:\apps\code.exe".into());
+
+        let identity = identity(&item).expect("an app has an identity");
+        assert!(claims(&identity, &group(&key, None)));
+    }
+
+    #[cfg(windows)]
     #[test]
     fn a_packaged_app_icon_goes_through_the_apps_folder() {
-        let key = AppKey::UserModelId("Some.App_abc!App".to_owned());
+        let key = AppKey::Id("Some.App_abc!App".to_owned());
 
         assert_eq!(icon_path(&key), r"shell:AppsFolder\Some.App_abc!App");
     }

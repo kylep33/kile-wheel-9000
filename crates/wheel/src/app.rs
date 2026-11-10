@@ -12,33 +12,32 @@ use kile_wheel_core::layout::SlotMemory;
 use kile_wheel_core::names::{ConfigPaths, DISPLAY_NAME, SETTINGS_EXE};
 use kile_wheel_core::select::{self, Offset, held};
 use kile_wheel_core::slot::{Slot, Tab};
-use kile_wheel_platform::apps::{AppKey, WindowModel};
+use kile_wheel_platform::apps::{AppKey, WindowId, WindowModel};
 use kile_wheel_platform::clipboard;
 use kile_wheel_platform::config_watch::ConfigWatcher;
-use kile_wheel_platform::hooks::{self, HookThread, InputEvent, SharedInput};
+use kile_wheel_platform::event_loop::{EventLoop, Notice};
 use kile_wheel_platform::icon_files;
 use kile_wheel_platform::icons::IconCache;
 use kile_wheel_platform::identity::IdentityCache;
+use kile_wheel_platform::input::{self, InputCapture, InputEvent, SharedInput};
 use kile_wheel_platform::installed;
+use kile_wheel_platform::instance::InstanceGuard;
 use kile_wheel_platform::monitor::{self, MonitorChoice};
+use kile_wheel_platform::os::DESKTOP;
 use kile_wheel_platform::paths::expand;
+use kile_wheel_platform::tray::{self, Tray};
 use kile_wheel_platform::watcher::{Watcher, WindowEvent};
-use kile_wheel_platform::{activate, dialog, launch, shell, snippet};
+use kile_wheel_platform::{activate, dialog, launch, process, snippet};
 use tracing::{info, warn};
-use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::WindowsAndMessaging::{
-    DestroyWindow, DispatchMessageW, GetMessageW, MSG, SetCursorPos, WM_TIMER,
-};
 
 use crate::form::grid::Tile;
 use crate::form::{Form, Outcome};
 use crate::keyboard::printable;
-use crate::overlay::{self, Overlay};
+use crate::overlay::Overlay;
 use crate::render::{FormView, Frame, GridView, HubView, SlotView};
 use crate::slots::{self, Layout, NewWindow, SlotEntry, SlotTarget};
 use crate::state::{Back, Mode, SubChoice, SubWheel, WheelState, WindowChoice};
 use crate::theme;
-use crate::tray::{self, Tray};
 
 /// Hotkey press to wheel visible. Spec requirement, not a nice to have.
 const OPEN_BUDGET: Duration = Duration::from_millis(50);
@@ -46,14 +45,18 @@ const OPEN_BUDGET: Duration = Duration::from_millis(50);
 /// What the notification area shows on hover.
 const TRAY_TOOLTIP: &str = "kile-wheel-9000";
 
+/// Drawn once rather than compiled in as an OS resource, which would pull a resource
+/// compiler into every platform's build.
+const TRAY_ICON_PNG: &[u8] = include_bytes!("../assets/tray.png");
+
 /// Asked before Quit, because losing the tray icon is how you lose the way back.
 const QUIT_PROMPT: &str = "Quit, and take the tray icon with it?\n\nThe hotkey stops working until you start it again.\n\nPick Disable instead to turn the wheel off and keep the icon.";
 
 /// Hold this long on a slot or the cog to toggle edit mode.
-const EDIT_HOLD_MS: u32 = 400;
+const EDIT_HOLD_MS: u64 = 400;
 
-/// Roughly one frame at 60Hz, for driving the form's open animation.
-const FRAME_MS: u32 = 16;
+/// Roughly one frame at 60Hz, for driving the open animations.
+const FRAME_MS: u64 = 16;
 
 const CLOCK_FORMAT: &str = "%H:%M";
 const DATE_FORMAT: &str = "%a %d %b";
@@ -68,9 +71,12 @@ struct Press {
 
 #[derive(Debug)]
 pub struct App {
-    /// Declared first so the hooks come down before the window they post to.
-    _hooks: HookThread,
+    /// Declared first so input capture stops before anything it wakes goes away.
+    _input: InputCapture,
     shared: Arc<SharedInput>,
+    event_loop: EventLoop,
+    /// Held so a second launch keeps handing over to this one.
+    _instance: InstanceGuard,
     overlay: Overlay,
     model: WindowModel,
     watcher: Watcher,
@@ -93,23 +99,32 @@ pub struct App {
     /// Off means the hotkeys are ignored, set from the tray menu.
     enabled: bool,
     redraw: bool,
+    /// When a left press turns into an edit-mode toggle. Measured by the loop rather than
+    /// on release, so edit mode arrives while the button is still down.
+    hold_due: Option<Instant>,
+    /// When the next animation frame is due. Without it an animation would stall, because
+    /// the loop otherwise only wakes for input.
+    frame_due: Option<Instant>,
+    running: bool,
 }
 
 impl App {
-    pub fn start(paths: ConfigPaths, config: Config) -> Result<Self> {
+    pub fn start(paths: ConfigPaths, config: Config, mut instance: InstanceGuard) -> Result<Self> {
+        let event_loop = EventLoop::new().context("could not set up the main event loop")?;
+
         let shared = Arc::new(SharedInput::default());
         shared.replace_bindings(
             config
                 .binding_table()
                 .context("the configured hotkeys could not be compiled")?,
         );
+        shared.set_waker(event_loop.waker());
 
         let overlay = Overlay::create(monitor::monitor_for(choice(&config)), &config)?;
-        shared.set_overlay(overlay.window());
 
-        let hooks = hooks::install(Arc::clone(&shared))
-            .context("could not install the input hooks, so no hotkey would work")?;
-        let watcher = Watcher::install().context(
+        let capture = input::install(Arc::clone(&shared))
+            .context("could not capture keyboard and mouse input, so no hotkey would work")?;
+        let watcher = Watcher::install(event_loop.waker()).context(
             "could not subscribe to window events, so the running app list would go stale",
         )?;
 
@@ -119,12 +134,14 @@ impl App {
             .context("could not enumerate the open windows")?;
         info!(apps = model.groups().len(), "window model built");
 
+        // a second launch that cannot reach us just starts nothing, which is no reason to
+        // refuse to run
+        if let Err(error) = instance.listen(event_loop.waker()) {
+            warn!("a second launch will not open this wheel: {error}");
+        }
+
         // a watch that fails to start costs live reload, not the whole launcher
-        let config_watch = match ConfigWatcher::start(
-            &paths.config_file(),
-            overlay.window(),
-            overlay::WM_CONFIG_CHANGED,
-        ) {
+        let config_watch = match ConfigWatcher::start(&paths.config_file(), event_loop.waker()) {
             Ok(watch) => Some(watch),
             Err(error) => {
                 warn!("config changes will need a restart to apply: {error}");
@@ -133,7 +150,7 @@ impl App {
         };
 
         // a tray icon that fails to appear costs the menu, not the launcher
-        let tray = match Tray::create(overlay.window(), TRAY_TOOLTIP) {
+        let tray = match Tray::create(TRAY_TOOLTIP, TRAY_ICON_PNG, event_loop.waker()) {
             Ok(tray) => Some(tray),
             Err(error) => {
                 warn!("no tray icon, so use the hotkey or the settings window: {error:#}");
@@ -142,8 +159,10 @@ impl App {
         };
 
         let mut app = Self {
-            _hooks: hooks,
+            _input: capture,
             shared,
+            event_loop,
+            _instance: instance,
             overlay,
             model,
             watcher,
@@ -160,6 +179,9 @@ impl App {
             tray,
             enabled: true,
             redraw: false,
+            hold_due: None,
+            frame_due: None,
+            running: true,
         };
 
         app.warm_up();
@@ -178,8 +200,8 @@ impl App {
 
     /// Draws one throwaway frame into the still-hidden window.
     ///
-    /// The first draw pays for shader compilation and the first buffer allocation, which
-    /// measured 64 ms. Spending it at startup keeps it out of the first open.
+    /// The first draw pays for rasterising every glyph and growing the window's buffer.
+    /// Spending it at startup keeps it out of the first open.
     fn warm_up(&mut self) {
         self.layout = self.build_layout();
         self.load_icons();
@@ -189,15 +211,14 @@ impl App {
     }
 
     pub fn run(mut self) -> Result<()> {
-        let mut message = MSG::default();
+        while self.running {
+            let deadline = self.next_deadline();
+            self.event_loop.wait(deadline);
 
-        // SAFETY: the pointer targets a live local; the loop ends on WM_QUIT or an error.
-        while unsafe { GetMessageW(&mut message, None, 0, 0) }.0 > 0 {
-            self.handle_message(&message);
-
-            // SAFETY: the message was just filled in by GetMessageW.
-            unsafe { DispatchMessageW(&message) };
-
+            self.fire_due_timers();
+            for notice in self.event_loop.take_notices() {
+                self.handle_notice(notice);
+            }
             self.absorb_window_events();
             self.absorb_input();
         }
@@ -206,39 +227,41 @@ impl App {
         Ok(())
     }
 
-    fn handle_message(&mut self, message: &MSG) {
-        if message.message == overlay::WM_OPEN_WHEEL {
-            let opened = self.open(None);
-            log_failure(opened);
-            return;
-        }
-        if message.message == WM_TIMER {
-            match message.wParam.0 {
-                // the tick re-checks the clock so the last frame of the growth also
-                // stops the timer, instead of redrawing a settled petal forever
-                overlay::FRAME_TIMER => {
-                    self.redraw = true;
-                    self.drive_animation();
-                }
-                _ => self.hold_elapsed(),
-            }
-            return;
-        }
-        if message.message == overlay::WM_CONFIG_CHANGED {
-            self.absorb_config_change();
-            return;
-        }
-        if message.message == tray::WM_TRAY_COMMAND {
-            self.handle_tray_command(tray::Command::from_id(message.wParam.0));
+    fn next_deadline(&self) -> Option<Instant> {
+        match (self.hold_due, self.frame_due) {
+            (Some(hold), Some(frame)) => Some(hold.min(frame)),
+            (hold, frame) => hold.or(frame),
         }
     }
 
-    /// A menu choice arrives here rather than running inside the menu's own message loop,
+    fn fire_due_timers(&mut self) {
+        let now = Instant::now();
+
+        if self.hold_due.is_some_and(|due| due <= now) {
+            self.hold_due = None;
+            self.hold_elapsed();
+        }
+
+        // the tick re-checks the clock so the last frame of the growth also stops the
+        // timer, instead of redrawing a settled petal forever
+        if self.frame_due.is_some_and(|due| due <= now) {
+            self.frame_due = None;
+            self.redraw = true;
+            self.drive_animation();
+        }
+    }
+
+    fn handle_notice(&mut self, notice: Notice) {
+        match notice {
+            Notice::OpenWheel => log_failure(self.open(None)),
+            Notice::ConfigChanged => self.absorb_config_change(),
+            Notice::Tray(command) => self.handle_tray_command(command),
+        }
+    }
+
+    /// A menu choice arrives here rather than running inside the menu's own event loop,
     /// which would re-enter the app while the menu still owns the thread.
-    fn handle_tray_command(&mut self, command: Option<tray::Command>) {
-        let Some(command) = command else {
-            return;
-        };
+    fn handle_tray_command(&mut self, command: tray::Command) {
         info!(?command, "tray command");
 
         match command {
@@ -272,7 +295,7 @@ impl App {
         }
         self.apply_suppression();
 
-        if let Some(tray) = &self.tray {
+        if let Some(tray) = &mut self.tray {
             tray.set_enabled(enabled);
         }
     }
@@ -287,13 +310,10 @@ impl App {
             .set_hotkeys_suppressed(!self.enabled || fullscreen);
     }
 
+    /// The loop ends cleanly, so the tray icon is removed on the way out.
     fn quit(&mut self) {
         self.close();
-
-        // the overlay's WM_DESTROY posts WM_QUIT, so the loop ends cleanly and the tray
-        // icon is removed on the way out
-        // SAFETY: destroys our own window, which posts WM_QUIT from its procedure.
-        let _ = unsafe { DestroyWindow(self.overlay.window()) };
+        self.running = false;
     }
 
     /// A bad edit keeps the config already in memory, so a typo cannot take the wheel out.
@@ -311,21 +331,17 @@ impl App {
         }
     }
 
+    /// The fullscreen check runs here rather than in the input callback, so that callback
+    /// stays cheap enough that the OS never gives up on it.
     fn absorb_window_events(&mut self) {
         for event in self.watcher.drain() {
-            match event {
-                WindowEvent::Changed(window) => self.model.refresh(window),
-                WindowEvent::Vanished(window) => self.model.remove(window),
-                WindowEvent::Focused(window) => self.on_focus_changed(window),
+            let focus_may_have_moved =
+                matches!(event, WindowEvent::Focused(_) | WindowEvent::Snapshot { .. });
+            self.model.apply(event);
+            if focus_may_have_moved {
+                self.apply_suppression();
             }
         }
-    }
-
-    /// The fullscreen check runs here rather than in the hook callback, so the hook stays
-    /// cheap enough that Windows never tears it down.
-    fn on_focus_changed(&mut self, window: HWND) {
-        self.model.set_focused(window);
-        self.apply_suppression();
     }
 
     fn absorb_input(&mut self) {
@@ -531,7 +547,7 @@ impl App {
     /// Gathered fresh on each open rather than cached, because the running list changes
     /// under you and a stale pin list would offer something you just unpinned.
     fn app_candidates(&self) -> Vec<AppCandidate> {
-        let mut candidates = installed::taskbar_pins();
+        let mut candidates = installed::app_candidates();
         let pinned_names: Vec<String> = candidates
             .iter()
             .map(|candidate| candidate.name.to_lowercase())
@@ -575,10 +591,12 @@ impl App {
             .is_some_and(|form| form.animating(duration_ms));
         let animating = form_running || (self.state.is_open() && self.state.animating(duration_ms));
 
-        match animating {
-            true => self.overlay.start_frame_timer(FRAME_MS),
-            false => self.overlay.stop_frame_timer(),
-        }
+        self.frame_due = match animating {
+            true => self
+                .frame_due
+                .or_else(|| Some(Instant::now() + Duration::from_millis(FRAME_MS))),
+            false => None,
+        };
     }
 
     fn save_item(&mut self, item: &Item) -> Result<()> {
@@ -683,11 +701,11 @@ impl App {
             return;
         }
 
-        self.overlay.start_hold_timer(EDIT_HOLD_MS);
+        self.hold_due = Some(Instant::now() + Duration::from_millis(EDIT_HOLD_MS));
     }
 
     fn end_press(&mut self) {
-        self.overlay.stop_hold_timer();
+        self.hold_due = None;
 
         let Some(press) = self.press.take() else {
             return;
@@ -712,8 +730,6 @@ impl App {
 
     /// The 400 ms hold turned into an edit-mode toggle, so the release is swallowed.
     fn hold_elapsed(&mut self) {
-        self.overlay.stop_hold_timer();
-
         let Some(press) = self.press.as_mut() else {
             return;
         };
@@ -804,12 +820,12 @@ impl App {
 
         if !exe.exists() {
             anyhow::bail!(
-                "{} is not beside the wheel; re-run install.ps1 to put it there",
+                "{} is not beside the wheel; re-run the installer to put it there",
                 exe.display()
             );
         }
 
-        shell::execute(&shell::Command::new(exe.to_string_lossy().into_owned()))
+        process::execute(&process::Command::new(exe.to_string_lossy().into_owned()))
             .context("could not start the settings window")
     }
 
@@ -877,8 +893,8 @@ impl App {
     /// Unconditional on purpose. A guard here once let a state desync leave the hook
     /// believing the wheel was open, which swallowed every key until the next open.
     fn close(&mut self) {
-        self.overlay.stop_hold_timer();
-        self.overlay.stop_frame_timer();
+        self.hold_due = None;
+        self.frame_due = None;
         self.form = None;
         self.press = None;
         self.shared.set_wheel_open(false);
@@ -901,11 +917,7 @@ impl App {
         if !wanted {
             return;
         }
-        let centre = self.overlay.centre();
-
-        // SAFETY: moves the cursor only. The move it generates is flagged injected, so our
-        // own mouse hook ignores it and the selection does not jump.
-        let _ = unsafe { SetCursorPos(centre.x, centre.y) };
+        monitor::move_cursor(self.overlay.centre());
     }
 
     /// Uploads any icon the GPU has not seen yet. Extraction is cached, so this is a
@@ -1202,18 +1214,12 @@ impl App {
     }
 
     fn window_choices(&self, entry: &SlotEntry) -> Vec<WindowChoice> {
-        let titles = self.model.groups();
         entry
             .windows
             .iter()
             .map(|handle| WindowChoice {
                 handle: *handle,
-                title: titles
-                    .iter()
-                    .flat_map(|group| group.windows.iter())
-                    .find(|window| window.handle == *handle)
-                    .map(|window| window.title.to_owned())
-                    .unwrap_or_default(),
+                title: self.model.title_of(*handle).unwrap_or_default().to_owned(),
             })
             .collect()
     }
@@ -1227,7 +1233,7 @@ impl App {
         launch::run(&item.kind).with_context(|| format!("could not run \"{}\"", item.name))
     }
 
-    fn focus_or_minimize(&self, window: HWND) -> Result<()> {
+    fn focus_or_minimize(&self, window: WindowId) -> Result<()> {
         if self.config.general.minimize_if_focused && activate::is_foreground(window) {
             activate::minimize(window);
             return Ok(());
@@ -1303,7 +1309,7 @@ fn unpinned_item(tab: Tab, slot: Slot) -> Item {
 }
 
 /// The mini glyph that marks what a slice is.
-fn glyph_for(kind: &ItemKind) -> &'static str {
+fn glyph_for(kind: &ItemKind) -> crate::render::Glyph {
     theme::TYPE_GLYPHS[kind.type_index()]
 }
 
@@ -1356,7 +1362,8 @@ fn hidden_windows_note(hidden: usize) -> Option<String> {
         _ => "windows",
     };
     Some(format!(
-        "{hidden} more {plural} open. Alt-Tab reaches the rest."
+        "{hidden} more {plural} open. {} reaches the rest.",
+        DESKTOP.window_switcher
     ))
 }
 

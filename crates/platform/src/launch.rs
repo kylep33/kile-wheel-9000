@@ -1,21 +1,19 @@
-//! Turning a configured item into something the shell can run.
+//! Turning a configured item into something the OS can run.
 
 use kile_wheel_core::item::{ItemKind, expand_exec};
 use thiserror::Error;
 
 use crate::paths::expand;
-use crate::shell::{self, Command, ShellError};
-
-const TERMINAL_EXE: &str = "wt.exe";
-const WSL_EXE: &str = "wsl.exe";
+use crate::process::{self, Command, ProcessError};
+use crate::sys;
 
 #[derive(Debug, Error)]
 pub enum LaunchError {
     #[error(transparent)]
-    Shell(#[from] ShellError),
+    Process(#[from] ProcessError),
 
     #[error(
-        "the exec template for \"{exec}\" names no program; it should start with something runnable, as in: wt.exe -- bash \"{{path}}\""
+        "the exec template for \"{exec}\" names no program; it should start with something runnable, followed by \"{{path}}\""
     )]
     EmptyExec { exec: String },
 
@@ -26,29 +24,29 @@ pub enum LaunchError {
     NothingToLaunch,
 }
 
-/// How a launch reaches the shell.
+/// How a launch reaches the OS.
 ///
 /// Anything with arguments has to be started as a program. Anything that is just a
-/// target is handed to Explorer, which resolves urls, folders, shortcuts and packaged
-/// apps the same way a double-click does.
+/// target is handed to the desktop, which resolves urls, folders and apps the same way a
+/// double-click does.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Launch {
+pub(crate) enum Launch {
     Program(Command),
-    ShellItem(String),
+    Open(String),
 }
 
 /// Runs everything except an app item that is already open, which the wheel handles
 /// itself because it needs the window list.
 pub fn run(kind: &ItemKind) -> Result<(), LaunchError> {
     match plan(kind)? {
-        Launch::Program(command) => shell::execute(&command).map_err(LaunchError::from),
-        Launch::ShellItem(target) => shell::open_shell_item(&target).map_err(LaunchError::from),
+        Launch::Program(command) => process::execute(&command).map_err(LaunchError::from),
+        Launch::Open(target) => process::open(&target).map_err(LaunchError::from),
     }
 }
 
 fn plan(kind: &ItemKind) -> Result<Launch, LaunchError> {
     match kind {
-        ItemKind::App { target } => Ok(Launch::ShellItem(expand(target))),
+        ItemKind::App { target } => Ok(sys::launch::app(&expand(target))),
         ItemKind::Script {
             path,
             exec,
@@ -60,15 +58,15 @@ fn plan(kind: &ItemKind) -> Result<Launch, LaunchError> {
             browser,
             browser_args,
         } => Ok(url_launch(url, browser.as_deref(), browser_args.as_deref())),
-        ItemKind::Folder { path } => Ok(Launch::ShellItem(expand(path))),
+        ItemKind::Folder { path } => Ok(Launch::Open(expand(path))),
         ItemKind::Terminal {
             profile,
             distro,
             cwd,
-        } => Ok(terminal(
-            profile.as_deref(),
-            distro.as_deref(),
-            cwd.as_deref(),
+        } => Ok(sys::launch::terminal(
+            non_blank(profile.as_deref()),
+            non_blank(distro.as_deref()),
+            non_blank(cwd.as_deref()),
         )),
         ItemKind::Snippet { .. } => Err(LaunchError::NotLaunchable),
         ItemKind::UnpinnedApp => Err(LaunchError::NothingToLaunch),
@@ -91,47 +89,21 @@ fn script(path: &str, exec: &str, cwd: Option<&str>, hidden: bool) -> Result<Lau
     ))
 }
 
-/// With no browser named the url goes to Explorer, which opens the default one.
+/// With no browser named the url goes to the desktop, which opens the default one.
 fn url_launch(url: &str, browser: Option<&str>, browser_args: Option<&str>) -> Launch {
-    let Some(browser) = browser.filter(|name| !name.trim().is_empty()) else {
-        return Launch::ShellItem(url.to_owned());
+    let Some(browser) = non_blank(browser) else {
+        return Launch::Open(url.to_owned());
     };
 
-    let arguments = match browser_args.filter(|args| !args.trim().is_empty()) {
+    let arguments = match non_blank(browser_args) {
         Some(args) => format!("{args} {url}"),
         None => url.to_owned(),
     };
     Launch::Program(Command::new(expand(browser)).with_arguments(Some(arguments)))
 }
 
-fn terminal(profile: Option<&str>, distro: Option<&str>, cwd: Option<&str>) -> Launch {
-    let mut arguments = Vec::new();
-
-    if let Some(profile) = profile.filter(|name| !name.trim().is_empty()) {
-        arguments.push("-p".to_owned());
-        arguments.push(quoted(profile));
-    }
-
-    match distro.filter(|name| !name.trim().is_empty()) {
-        // a wsl start directory is a linux path, so wsl takes it rather than wt
-        Some(distro) => {
-            arguments.push(WSL_EXE.to_owned());
-            arguments.push("-d".to_owned());
-            arguments.push(quoted(distro));
-            if let Some(cwd) = cwd.filter(|path| !path.trim().is_empty()) {
-                arguments.push("--cd".to_owned());
-                arguments.push(quoted(cwd));
-            }
-        }
-        None => {
-            if let Some(cwd) = cwd.filter(|path| !path.trim().is_empty()) {
-                arguments.push("-d".to_owned());
-                arguments.push(quoted(&expand(cwd)));
-            }
-        }
-    }
-
-    Launch::Program(Command::new(TERMINAL_EXE).with_arguments(Some(arguments.join(" "))))
+fn non_blank(text: Option<&str>) -> Option<&str> {
+    text.filter(|text| !text.trim().is_empty())
 }
 
 /// Splits the leading program off a command line, honouring quotes around it.
@@ -152,10 +124,6 @@ fn split_program(line: &str) -> Option<(String, String)> {
     }
 }
 
-fn quoted(text: &str) -> String {
-    format!("\"{text}\"")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,22 +131,22 @@ mod tests {
     fn program_of(launch: &Launch) -> &str {
         match launch {
             Launch::Program(command) => &command.program,
-            Launch::ShellItem(target) => target,
+            Launch::Open(target) => target,
         }
     }
 
     fn arguments_of(launch: &Launch) -> Option<&str> {
         match launch {
             Launch::Program(command) => command.arguments.as_deref(),
-            Launch::ShellItem(_) => None,
+            Launch::Open(_) => None,
         }
     }
 
     #[test]
     fn a_bare_program_splits_with_no_arguments() {
         assert_eq!(
-            split_program("wt.exe"),
-            Some(("wt.exe".to_owned(), String::new()))
+            split_program("bash"),
+            Some(("bash".to_owned(), String::new()))
         );
     }
 
@@ -204,42 +172,22 @@ mod tests {
         assert_eq!(split_program("   "), None);
     }
 
-    /// An app, a folder and a bare url all go to Explorer, because it already knows how
-    /// to resolve every one of them.
     #[test]
-    fn targets_without_arguments_go_to_explorer() {
-        let app = plan(&ItemKind::App {
-            target: r"C:\Apps\Code.exe".to_owned(),
-        })
-        .expect("plans");
+    fn a_folder_goes_to_the_desktop() {
         let folder = plan(&ItemKind::Folder {
-            path: r"C:\projects".to_owned(),
+            path: "/projects".to_owned(),
         })
         .expect("plans");
 
-        assert_eq!(app, Launch::ShellItem(r"C:\Apps\Code.exe".to_owned()));
-        assert_eq!(folder, Launch::ShellItem(r"C:\projects".to_owned()));
-    }
-
-    #[test]
-    fn a_packaged_app_target_passes_through_untouched() {
-        let plan = plan(&ItemKind::App {
-            target: r"shell:AppsFolder\Some.App_abc!App".to_owned(),
-        })
-        .expect("plans");
-
-        assert_eq!(
-            plan,
-            Launch::ShellItem(r"shell:AppsFolder\Some.App_abc!App".to_owned())
-        );
+        assert_eq!(folder, Launch::Open("/projects".to_owned()));
     }
 
     #[test]
     fn a_script_substitutes_its_path_into_the_template() {
-        let plan = script(r"C:\s\go.sh", r#"wt.exe -- bash "{path}""#, None, false).expect("plans");
+        let plan = script("/s/go.sh", r#"bash "{path}""#, None, false).expect("plans");
 
-        assert_eq!(program_of(&plan), "wt.exe");
-        assert_eq!(arguments_of(&plan), Some(r#"-- bash "C:\s\go.sh""#));
+        assert_eq!(program_of(&plan), "bash");
+        assert_eq!(arguments_of(&plan), Some(r#""/s/go.sh""#));
     }
 
     #[test]
@@ -253,21 +201,21 @@ mod tests {
     }
 
     #[test]
-    fn a_url_without_a_browser_goes_to_explorer() {
+    fn a_url_without_a_browser_goes_to_the_desktop() {
         let plan = url_launch("https://example.test", None, None);
 
-        assert_eq!(plan, Launch::ShellItem("https://example.test".to_owned()));
+        assert_eq!(plan, Launch::Open("https://example.test".to_owned()));
     }
 
     #[test]
     fn a_url_with_a_browser_passes_the_profile_args_first() {
         let plan = url_launch(
             "https://example.test",
-            Some("chrome.exe"),
+            Some("chrome"),
             Some("--profile-directory=Work"),
         );
 
-        assert_eq!(program_of(&plan), "chrome.exe");
+        assert_eq!(program_of(&plan), "chrome");
         assert_eq!(
             arguments_of(&plan),
             Some("--profile-directory=Work https://example.test")
@@ -278,33 +226,7 @@ mod tests {
     fn a_blank_browser_is_treated_as_unset() {
         let plan = url_launch("https://example.test", Some("  "), None);
 
-        assert_eq!(plan, Launch::ShellItem("https://example.test".to_owned()));
-    }
-
-    #[test]
-    fn a_windows_terminal_profile_gets_a_windows_start_directory() {
-        let plan = terminal(Some("PowerShell"), None, Some(r"C:\work"));
-
-        assert_eq!(program_of(&plan), TERMINAL_EXE);
-        assert_eq!(arguments_of(&plan), Some(r#"-p "PowerShell" -d "C:\work""#));
-    }
-
-    #[test]
-    fn a_wsl_profile_hands_the_start_directory_to_wsl() {
-        let plan = terminal(Some("Ubuntu"), Some("Ubuntu"), Some("~/ws"));
-
-        assert_eq!(
-            arguments_of(&plan),
-            Some(r#"-p "Ubuntu" wsl.exe -d "Ubuntu" --cd "~/ws""#)
-        );
-    }
-
-    #[test]
-    fn a_terminal_with_nothing_set_still_opens() {
-        let plan = terminal(None, None, None);
-
-        assert_eq!(program_of(&plan), TERMINAL_EXE);
-        assert_eq!(arguments_of(&plan), None);
+        assert_eq!(plan, Launch::Open("https://example.test".to_owned()));
     }
 
     #[test]

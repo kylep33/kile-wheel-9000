@@ -13,7 +13,26 @@ kile-wheel-core = { path = "crates/core" }
 kile-wheel-platform = { path = "crates/platform" }
 
 anyhow = "1.0.104"
+dirs = "7.0.0"
+evdev = "0.13.2"
+# async-io rather than the default tokio, so the tray does not pull in a second runtime
+ksni = { version = "0.3.7", default-features = false, features = ["blocking", "async-io"] }
+libc = "0.2.190"
+objc2 = "0.6.5"
+objc2-app-kit = "0.3.2"
+objc2-application-services = "0.3.2"
+objc2-core-foundation = "0.3.2"
+objc2-core-graphics = "0.3.2"
+objc2-foundation = "0.3.2"
+objc2-quartz-core = "0.3.2"
+# matches the version ksni brings, so the tray and the shell calls share one zbus
+zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "bmp", "gif", "webp", "ico"] }
+tray-icon = "0.26.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+cosmic-text = "0.19.0"
+# tiny-skia comes through resvg's re-export, so the two can never disagree on its version
+resvg = { version = "0.49.0", default-features = false }
 eframe = "0.36.2"
 egui = "0.36.2"
 notify = "8.2.0"
@@ -26,23 +45,11 @@ tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
-# must track what the windows crate itself uses, or Direct2D's Vector2 is a different type
-windows-numerics = "0.3.1"
-
 # features unify across the workspace anyway, so they are declared once here
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
-    "Win32_Graphics_Direct2D",
-    "Win32_Graphics_Direct2D_Common",
-    "Win32_Graphics_Direct3D",
-    "Win32_Graphics_Direct3D11",
-    "Win32_Graphics_DirectComposition",
-    "Win32_Graphics_DirectWrite",
     "Win32_Graphics_Dwm",
-    "Win32_Graphics_Dxgi",
-    "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
-    "Win32_Graphics_Imaging",
     "Win32_Security",
     "Win32_Storage_EnhancedStorage",
     "Win32_System_Com",

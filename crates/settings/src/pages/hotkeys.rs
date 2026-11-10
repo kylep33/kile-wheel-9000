@@ -2,6 +2,7 @@
 
 use kile_wheel_core::binding::Action;
 use kile_wheel_core::config::HotkeyConfig;
+use kile_wheel_platform::os::DESKTOP;
 
 use crate::draft::binding_problem;
 use crate::ui::Settings;
@@ -77,5 +78,8 @@ fn draw_help(ui: &mut egui::Ui) {
     ui.label("Notes");
     ui.label("  A modifier-only combo fires on whichever key completes it, in any order.");
     ui.label("  Close bindings only fire while the wheel is open, so they stay usable elsewhere.");
-    ui.label("  Alt+Shift is the Windows keyboard-layout switch; binding it takes that over.");
+    ui.label(format!(
+        "  {} is spelled Win in a binding. Desktop shortcuts you bind here stop reaching the desktop.",
+        DESKTOP.super_key
+    ));
 }

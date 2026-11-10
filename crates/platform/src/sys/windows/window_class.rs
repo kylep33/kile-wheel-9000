@@ -26,14 +26,6 @@ pub fn is_uwp_host(window: HWND) -> bool {
     class_matches(window, UWP_HOST_CLASSES)
 }
 
-/// For logs only; the predicates above avoid the allocation.
-pub fn class_name(window: HWND) -> Option<String> {
-    let mut buffer = [0u16; MAX_CLASS_NAME_LEN];
-    let written = read_class(window, &mut buffer)?;
-
-    Some(String::from_utf16_lossy(written))
-}
-
 fn class_matches(window: HWND, candidates: &[&str]) -> bool {
     let mut buffer = [0u16; MAX_CLASS_NAME_LEN];
     let Some(class) = read_class(window, &mut buffer) else {

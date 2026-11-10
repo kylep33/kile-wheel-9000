@@ -81,7 +81,7 @@ fn draw_mouse_control(ui: &mut egui::Ui, wheel: &mut WheelSettings) {
     ui.label("  Sub-wheel covers going into a window picker and backing out of it.");
 }
 
-/// Apps that should never take an unpinned slot, such as a status bar that Windows
+/// Apps that should never take an unpinned slot, such as a status bar the desktop
 /// reports as an ordinary app.
 fn draw_hidden_apps(ui: &mut egui::Ui, apps: &mut Vec<String>) {
     ui.label("Hidden apps");

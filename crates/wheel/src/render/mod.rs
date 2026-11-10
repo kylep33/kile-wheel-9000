@@ -1,63 +1,33 @@
-//! Direct2D drawing composited by DirectComposition.
+//! The wheel, drawn on the CPU into one premultiplied RGBA buffer.
 //!
-//! A layered window would need a CPU bitmap blit every frame. DirectComposition
-//! composites on the GPU and handles premultiplied alpha itself, so the overlay gets
-//! real per-pixel transparency with no blit.
+//! Every OS gets the same pixels, so the platform layer only has to put a buffer on
+//! screen. Geometry is in window units: physical pixels on Windows, points on macOS, and
+//! stage pixels on GNOME. `pixel_ratio` turns units into buffer pixels.
 
 mod form;
 pub mod geometry;
+mod glyphs;
 mod icons;
 mod text;
 
 use std::collections::HashMap;
 
+use anyhow::{Context, Result};
 use kile_wheel_core::slot::Slot;
 use kile_wheel_platform::icons::IconImage;
-use windows::Win32::Foundation::{HMODULE, HWND};
-use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+use resvg::tiny_skia::{
+    self, Color, FillRule, FilterQuality, Paint, Path, PathBuilder, Pixmap, PixmapPaint, Stroke,
+    Transform,
 };
-use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
-    D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_ELLIPSE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
-    D2D1CreateFactory, ID2D1Bitmap1, ID2D1DeviceContext, ID2D1Factory1, ID2D1Image,
-    ID2D1PathGeometry1, ID2D1SolidColorBrush,
-};
-use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
-use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
-};
-use windows::Win32::Graphics::DirectComposition::{
-    DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
-};
-use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN,
-    DXGI_SAMPLE_DESC,
-};
-use windows::Win32::Graphics::Dxgi::{
-    DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
-    DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice, IDXGIFactory2,
-    IDXGISurface, IDXGISwapChain1,
-};
-use windows::core::{Interface, Result};
-use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::anim;
 use crate::form::{Line, Petal, RowValue, grid};
-use crate::theme::{self, Metrics, Palette};
+use crate::geom::{Point, Rect};
+use crate::theme::{self, Colour, Metrics, Palette};
+pub use glyphs::Glyph;
 use geometry::{Wedges, on_circle, slot_bearing_rad, slot_edge_rad};
-use text::Fonts;
-use windows::Win32::Graphics::DirectWrite::IDWriteFactory;
-
-/// Two buffers is the minimum the flip model accepts, and all the overlay needs.
-const BUFFER_COUNT: u32 = 2;
-
-/// Present on the next vblank. The open budget allows one frame.
-const PRESENT_SYNC_INTERVAL: u32 = 1;
-
-/// Keeps `ResizeBuffers` on the size the swap chain already has.
-const KEEP_BUFFER_COUNT: u32 = 0;
+use glyphs::Glyphs;
+use text::{Fonts, Style, TextPainter, TextRequest};
 
 /// Pill under a running app's icon, as a fraction of the wedge's label box.
 const RUNNING_PILL_WIDTH_RATIO: f32 = 0.22;
@@ -89,10 +59,12 @@ const GRID_TILE_PADDING_PX: f32 = 4.0;
 /// readable on the first frame, far enough to read as arriving.
 const APPEAR_FROM_SCALE: f32 = 0.88;
 
-const NO_MULTISAMPLING: DXGI_SAMPLE_DESC = DXGI_SAMPLE_DESC {
-    Count: 1,
-    Quality: 0,
-};
+/// The appear scale is rounded to this many steps per unit, so text is only rasterised
+/// at a handful of sizes and the glyph cache stays bounded.
+const APPEAR_SCALE_STEPS: f32 = 100.0;
+
+/// Antialiasing reaches a pixel past a shape's edge.
+const ANTIALIAS_REACH_PX: f32 = 1.0;
 
 /// How a slot should be drawn.
 #[derive(Debug, Default, Clone, Copy)]
@@ -101,7 +73,7 @@ pub struct SlotView<'a> {
     /// Cache key of an already uploaded icon.
     pub icon_key: Option<&'a str>,
     /// Mini glyph for the slot's type, or none for a slot the config left blank.
-    pub type_glyph: Option<&'static str>,
+    pub type_glyph: Option<Glyph>,
     pub running: bool,
     pub focused: bool,
     pub window_count: usize,
@@ -156,106 +128,165 @@ pub struct GridView {
     pub caption: String,
 }
 
-/// The GPU side of the overlay.
+/// The part of the buffer a frame drew into, in buffer pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Region {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// A finished frame: the whole buffer, and the part of it worth putting on screen.
+#[derive(Debug)]
+pub struct Drawn<'a> {
+    pub pixmap: &'a Pixmap,
+    pub region: Region,
+}
+
+/// Owns the buffer and everything that is expensive to rebuild per frame.
 #[derive(Debug)]
 pub struct Renderer {
-    factory: ID2D1Factory1,
-    context: ID2D1DeviceContext,
-    swap_chain: IDXGISwapChain1,
-    brush: ID2D1SolidColorBrush,
-    fonts: Fonts,
-    text_factory: IDWriteFactory,
-    wedges: Wedges,
-    icons: HashMap<String, ID2D1Bitmap1>,
-    size_px: u32,
+    scene: Scene,
+    pixmap: Pixmap,
+    pixel_ratio: f32,
+    text: TextPainter,
+    glyphs: Glyphs,
+    icons: HashMap<String, Pixmap>,
+    /// Everything outside this is already clear, so the next frame only wipes this much.
+    /// `None` means the whole buffer may hold ink.
+    last_region: Option<Region>,
+}
+
+/// What a frame is drawn against: sizes, colours and the shapes built from them.
+#[derive(Debug)]
+struct Scene {
+    size: f32,
     metrics: Metrics,
     palette: Palette,
-    /// The part of the window that is on screen, in window coordinates. `None` until the
+    fonts: Fonts,
+    wedges: Wedges,
+    /// The part of the window that is on screen, in window units. `None` until the
     /// window has been placed, which means all of it.
-    visible: Option<D2D_RECT_F>,
-    /// Held so the composition tree stays alive for as long as the window does.
-    _composition: IDCompositionDevice,
-    _target: IDCompositionTarget,
-    _visual: IDCompositionVisual,
+    visible: Option<Rect>,
 }
 
 impl Renderer {
-    pub fn new(window: HWND, size_px: u32, metrics: Metrics, palette: Palette) -> Result<Self> {
-        let d3d_device = create_d3d_device()?;
-        let dxgi_device: IDXGIDevice = d3d_device.cast()?;
-
-        // SAFETY: a single-threaded factory matches this renderer living on one thread.
-        let factory: ID2D1Factory1 =
-            unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None) }?;
-
-        // SAFETY: both devices are live for the rest of this function.
-        let context = unsafe {
-            let d2d_device = factory.CreateDevice(&dxgi_device)?;
-            d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?
-        };
-
-        let swap_chain = create_swap_chain(&d3d_device, &dxgi_device, size_px)?;
-
-        // SAFETY: the DXGI device is live, and the tree is kept alive by this struct.
-        let (composition, target, visual) = unsafe {
-            let composition: IDCompositionDevice = DCompositionCreateDevice(&dxgi_device)?;
-            let target = composition.CreateTargetForHwnd(window, true)?;
-            let visual = composition.CreateVisual()?;
-
-            visual.SetContent(&swap_chain)?;
-            target.SetRoot(&visual)?;
-            composition.Commit()?;
-            (composition, target, visual)
-        };
-
-        // SAFETY: the colour is copied; the brush is retargeted before every use.
-        let brush = unsafe { context.CreateSolidColorBrush(&palette.label, None) }?;
-
-        let wedges = Wedges::build(&factory, centre_of(size_px), metrics)?;
-
-        let (fonts, text_factory) = Fonts::new(metrics)?;
-
+    /// `size` is the square window's side in window units.
+    pub fn new(size: f32, pixel_ratio: f32, metrics: Metrics, palette: Palette) -> Result<Self> {
         Ok(Self {
-            fonts,
-            text_factory,
-            factory,
-            context,
-            swap_chain,
-            brush,
-            wedges,
+            scene: Scene::new(size, metrics, palette),
+            pixmap: buffer_for(size, pixel_ratio)?,
+            pixel_ratio,
+            text: TextPainter::new(),
+            glyphs: Glyphs::default(),
             icons: HashMap::new(),
-            size_px,
-            metrics,
-            palette,
-            visible: None,
-            _composition: composition,
-            _target: target,
-            _visual: visual,
+            last_region: None,
         })
     }
 
     pub fn metrics(&self) -> Metrics {
-        self.metrics
+        self.scene.metrics
+    }
+
+    pub fn pixel_ratio(&self) -> f32 {
+        self.pixel_ratio
     }
 
     /// Records which part of the window is on screen, so a petal is kept inside it.
-    pub fn set_visible(&mut self, visible: D2D_RECT_F) {
-        self.visible = Some(visible);
+    pub fn set_visible(&mut self, visible: Rect) {
+        self.scene.visible = Some(visible);
     }
 
-    /// Which form line is under `point`, in window coordinates.
+    /// Which form line is under `point`, in window units.
     ///
     /// The hit test lives here because the petal's geometry does, and a second copy in the
     /// app would be one more thing to keep in step. The appear transform is not undone: it
     /// has settled back to 1 by the time a click is possible.
-    pub fn form_row_at(&self, view: &FormView<'_>, point: Vector2) -> Option<usize> {
-        let petal = self.petal_for(view);
+    pub fn form_row_at(&self, view: &FormView<'_>, point: Point) -> Option<usize> {
+        let petal = self.scene.petal_for(view);
 
         if let Some(grid) = view.grid {
             return (0..grid.tiles.len())
-                .find(|index| contains(&grid::tile_bounds(&petal, *index), point));
+                .find(|index| grid::tile_bounds(&petal, *index).contains(point));
         }
-        (0..view.lines.len()).find(|index| contains(&petal.row_bounds(*index), point))
+        (0..view.lines.len()).find(|index| petal.row_bounds(*index).contains(point))
+    }
+
+    pub fn has_icon(&self, key: &str) -> bool {
+        self.icons.contains_key(key)
+    }
+
+    /// Kept for the process lifetime, because there are only ever as many as there are
+    /// pinned and running apps.
+    pub fn upload_icon(&mut self, key: &str, image: &IconImage) -> Result<()> {
+        let pixmap = icons::to_pixmap(image).with_context(|| {
+            format!(
+                "the icon for {key} is {}x{} but carries {} bytes",
+                image.width,
+                image.height,
+                image.rgba.len()
+            )
+        })?;
+        self.icons.insert(key.to_owned(), pixmap);
+        Ok(())
+    }
+
+    /// Matches the buffer and the wedge outlines to a new size, which happens when the
+    /// wheel moves to a monitor with a different scale.
+    pub fn resize(
+        &mut self,
+        size: f32,
+        pixel_ratio: f32,
+        metrics: Metrics,
+        palette: Palette,
+    ) -> Result<()> {
+        let visible = self.scene.visible;
+        self.scene = Scene::new(size, metrics, palette);
+        self.scene.visible = visible;
+
+        let (width, _) = buffer_side(size, pixel_ratio);
+        if width != self.pixmap.width() || pixel_ratio != self.pixel_ratio {
+            self.pixmap = buffer_for(size, pixel_ratio)?;
+            self.pixel_ratio = pixel_ratio;
+            self.last_region = None;
+        }
+        Ok(())
+    }
+
+    pub fn draw(&mut self, frame: &Frame<'_>) -> Drawn<'_> {
+        clear(&mut self.pixmap, self.last_region.take());
+
+        let mut canvas = Canvas {
+            pixmap: &mut self.pixmap,
+            text: &mut self.text,
+            glyphs: &mut self.glyphs,
+            icons: &self.icons,
+            view: View::identity(self.pixel_ratio),
+            pixel_ratio: self.pixel_ratio,
+            inked: Rect::default(),
+        };
+        self.scene.draw_wheel(&mut canvas, frame);
+
+        let region = region_of(canvas.inked, &self.pixmap);
+        self.last_region = Some(region);
+        Drawn {
+            pixmap: &self.pixmap,
+            region,
+        }
+    }
+}
+
+impl Scene {
+    fn new(size: f32, metrics: Metrics, palette: Palette) -> Self {
+        Self {
+            size,
+            metrics,
+            palette,
+            fonts: Fonts::new(metrics),
+            wedges: Wedges::build(centre_of(size), metrics),
+            visible: None,
+        }
     }
 
     fn petal_for(&self, view: &FormView<'_>) -> Petal {
@@ -265,150 +296,50 @@ impl Renderer {
         };
 
         Petal::new(
-            centre_of(self.size_px),
+            centre_of(self.size),
             self.metrics.radius_px,
             slot_bearing_rad(view.slot),
             rows,
             view.progress,
-            self.drawable_bounds(),
+            drawable_area(self.size, self.visible),
         )
     }
 
-    pub fn has_icon(&self, key: &str) -> bool {
-        self.icons.contains_key(key)
-    }
+    fn draw_wheel(&self, canvas: &mut Canvas<'_>, frame: &Frame<'_>) {
+        let centre = centre_of(self.size);
+        let metrics = self.metrics;
+        let palette = &self.palette;
 
-    /// Uploads an icon once. Kept on the GPU for the process lifetime, because there are
-    /// only ever as many as there are pinned and running apps.
-    pub fn upload_icon(&mut self, key: &str, image: &IconImage) -> Result<()> {
-        let bitmap = icons::upload(&self.context, image)?;
-        self.icons.insert(key.to_owned(), bitmap);
-        Ok(())
-    }
+        canvas.view = View::appearing(canvas.pixel_ratio, centre, frame.appear);
 
-    /// Matches the swap chain and the wedge outlines to a new size, which happens when
-    /// the wheel moves to a monitor with a different DPI.
-    pub fn resize(&mut self, size_px: u32, metrics: Metrics, palette: Palette) -> Result<()> {
-        self.palette = palette;
-        if self.size_px == size_px {
-            self.metrics = metrics;
-            return Ok(());
-        }
-
-        // SAFETY: the target is unbound first, because ResizeBuffers needs every
-        // reference to the old buffers released.
-        unsafe {
-            self.context.SetTarget(None);
-            self.swap_chain.ResizeBuffers(
-                KEEP_BUFFER_COUNT,
-                size_px,
-                size_px,
-                DXGI_FORMAT_UNKNOWN,
-                DXGI_SWAP_CHAIN_FLAG(0),
-            )?;
-        }
-
-        self.size_px = size_px;
-        self.metrics = metrics;
-        let (fonts, text_factory) = Fonts::new(metrics)?;
-        self.fonts = fonts;
-        self.text_factory = text_factory;
-        self.wedges = Wedges::build(&self.factory, centre_of(size_px), metrics)?;
-        Ok(())
-    }
-
-    pub fn draw(&self, frame: &Frame<'_>) -> Result<()> {
-        let surface = self.back_buffer()?;
-
-        // SAFETY: the surface is bound, drawn to, then unbound before it is dropped.
-        unsafe {
-            self.context.SetTarget(Some(&surface));
-            self.context.BeginDraw();
-            self.context.Clear(Some(&self.palette.transparent));
-        }
-
-        self.draw_wheel(frame);
-
-        // SAFETY: matches the BeginDraw above.
-        unsafe {
-            self.context.EndDraw(None, None)?;
-            self.context.SetTarget(None);
-            self.swap_chain
-                .Present(PRESENT_SYNC_INTERVAL, DXGI_PRESENT(0))
-                .ok()?;
-        }
-        Ok(())
-    }
-
-    fn draw_wheel(&self, frame: &Frame<'_>) {
-        let centre = centre_of(self.size_px);
-
-        self.apply_appear(centre, frame.appear);
-
-        self.fill_circle(centre, self.metrics.radius_px, &self.palette.backdrop);
-        self.fill_wedges(frame);
-        self.draw_dividers(centre);
-        self.stroke_circle(
-            centre,
-            self.metrics.radius_px,
-            &self.palette.ring,
-            self.metrics.ring_stroke_px,
-        );
+        canvas.fill_circle(centre, metrics.radius_px, palette.backdrop);
+        self.fill_wedges(canvas, frame);
+        self.draw_dividers(canvas, centre);
+        canvas.stroke_circle(centre, metrics.radius_px, palette.ring, metrics.ring_stroke_px);
 
         for slot in Slot::all() {
-            self.draw_slot(centre, slot, frame);
+            self.draw_slot(canvas, centre, slot, frame);
         }
 
-        self.draw_hub(centre, frame);
+        self.draw_hub(canvas, centre, frame);
 
         if let Some(view) = &frame.form {
-            self.draw_form(centre, view);
+            self.draw_form(canvas, centre, view);
         }
-
-        // SAFETY: leaves the context as it was found, so the next frame starts clean.
-        unsafe { self.context.SetTransform(&Matrix3x2::identity()) };
-    }
-
-    /// The wheel grows into place from slightly small, which points the eye at the centre
-    /// without delaying anything: input is live from the first frame.
-    fn apply_appear(&self, centre: Vector2, progress: f32) {
-        let scale = anim::lerp(APPEAR_FROM_SCALE, 1.0, progress);
-        let transform = Matrix3x2::scale_around(scale, scale, centre);
-
-        // SAFETY: the matrix is copied into the context by the call.
-        unsafe { self.context.SetTransform(&transform) };
     }
 
     /// The petal grows from its slice, so it is obvious which slot is being edited.
-    fn draw_form(&self, centre: Vector2, view: &FormView<'_>) {
+    fn draw_form(&self, canvas: &mut Canvas<'_>, centre: Point, view: &FormView<'_>) {
         let petal = self.petal_for(view);
+        let palette = &self.palette;
 
-        if let Ok(neck) = form::neck(&self.factory, centre, &petal) {
-            // SAFETY: the geometry and brush are live for the duration of the calls.
-            unsafe {
-                self.context
-                    .FillGeometry(&neck, self.brush(&self.palette.hub), None);
-                self.context.DrawGeometry(
-                    &neck,
-                    self.brush(&self.palette.accent_dim),
-                    self.metrics.divider_stroke_px,
-                    None,
-                );
-            }
+        if let Some(neck) = form::neck(centre, &petal) {
+            canvas.fill_path(&neck, palette.hub);
+            canvas.stroke_path(&neck, palette.accent_dim, self.metrics.divider_stroke_px);
         }
-
-        let panel = form::panel(&petal);
-
-        // SAFETY: the geometry and brush are live for the duration of the calls.
-        unsafe {
-            self.context
-                .FillRoundedRectangle(&panel, self.brush(&self.palette.hub));
-            self.context.DrawRoundedRectangle(
-                &panel,
-                self.brush(&self.palette.accent),
-                self.metrics.selected_stroke_px,
-                None,
-            );
+        if let Some(panel) = form::panel(&petal) {
+            canvas.fill_path(&panel, palette.hub);
+            canvas.stroke_path(&panel, palette.accent, self.metrics.selected_stroke_px);
         }
 
         // the panel is still growing, so there is no room for text yet
@@ -416,80 +347,63 @@ impl Renderer {
             return;
         }
 
-        self.draw_text(
-            view.title,
-            petal.title_bounds(),
-            self.fonts.hub_tab(),
-            &self.palette.accent,
-        );
+        canvas.text(view.title, petal.title_bounds(), self.fonts.hub_tab, palette.accent, None);
         if let Some(grid) = view.grid {
-            self.draw_grid(&petal, grid);
+            self.draw_grid(canvas, &petal, grid);
             return;
         }
         for (index, line) in view.lines.iter().enumerate() {
-            self.draw_form_line(&petal, index, line);
+            self.draw_form_line(canvas, &petal, index, line);
         }
     }
 
-    fn draw_grid(&self, petal: &Petal, view: &GridView) {
+    fn draw_grid(&self, canvas: &mut Canvas<'_>, petal: &Petal, view: &GridView) {
         for (index, key) in view.tiles.iter().enumerate() {
             let tile = grid::tile_bounds(petal, index);
 
             if view.highlighted == Some(index) {
-                // SAFETY: the geometry and brush are live for the duration of the call.
-                unsafe {
-                    self.context
-                        .FillRectangle(&tile, self.brush(&self.palette.wedge_selected))
-                };
+                canvas.fill_rect(tile, self.palette.wedge_selected, None);
             }
             if let Some(key) = key {
-                self.draw_bitmap(key, form::square_in(tile, GRID_TILE_PADDING_PX));
+                canvas.bitmap(key, form::square_in(tile, GRID_TILE_PADDING_PX));
             }
         }
 
-        self.draw_text(
+        canvas.text(
             &view.caption,
             grid::caption_bounds(petal),
-            self.fonts.value(),
-            &self.palette.label,
+            self.fonts.value,
+            self.palette.label,
+            None,
         );
     }
 
-    fn draw_form_line(&self, petal: &Petal, index: usize, line: &Line) {
+    fn draw_form_line(&self, canvas: &mut Canvas<'_>, petal: &Petal, index: usize, line: &Line) {
         let row = petal.row_bounds(index);
 
         if line.focused {
-            // SAFETY: the geometry and brush are live for the duration of the call.
-            unsafe {
-                self.context
-                    .FillRectangle(&row, self.brush(&self.palette.wedge_selected))
-            };
+            canvas.fill_rect(row, self.palette.wedge_selected, None);
         }
 
         let colour = match line.focused {
-            true => &self.palette.label_selected,
-            false => &self.palette.label,
+            true => self.palette.label_selected,
+            false => self.palette.label,
         };
 
         // an action is a button, so it spans the row rather than sitting in a label column
         if line.action {
-            self.draw_text(&line.label, row, self.fonts.number(), colour);
+            canvas.text(&line.label, row, self.fonts.number, colour, None);
             return;
         }
 
         let (label, value) = form::split_row(row, FORM_LABEL_RATIO);
-        self.draw_text(
-            &line.label,
-            label,
-            self.fonts.number(),
-            &self.palette.number,
-        );
-        self.draw_value(value, line, colour);
+        canvas.text(&line.label, label, self.fonts.number, self.palette.number, None);
+        self.draw_value(canvas, value, line, colour);
     }
 
     /// The caret is drawn by measuring the text before it, which is why the value arrives
     /// already split in two.
-    fn draw_value(&self, bounds: D2D_RECT_F, line: &Line, colour: &D2D1_COLOR_F) {
+    fn draw_value(&self, canvas: &mut Canvas<'_>, bounds: Rect, line: &Line, colour: Colour) {
         let Some(value) = &line.value else {
             return;
         };
@@ -501,16 +415,11 @@ impl Renderer {
                     true => "yes",
                     false => "no",
                 };
-                self.draw_text(text, bounds, self.fonts.number(), colour);
+                canvas.text(text, bounds, self.fonts.number, colour, None);
                 return;
             }
             RowValue::Choice(chosen) => {
-                self.draw_text(
-                    &format!("< {chosen} >"),
-                    bounds,
-                    self.fonts.number(),
-                    colour,
-                );
+                canvas.text(&format!("< {chosen} >"), bounds, self.fonts.number, colour, None);
                 return;
             }
         };
@@ -520,100 +429,53 @@ impl Renderer {
 
         // at rest a long value is cut short with an ellipsis, so it stays on its line
         if !line.focused {
-            self.draw_text(&text, bounds, self.fonts.value(), colour);
+            canvas.text(&text, bounds, self.fonts.value, colour, None);
             return;
         }
 
         // being edited it shows in full, sliding left under the caret so the part you are
         // typing is always in view; the clip keeps the overflow off the label column
-        let caret_px = self.measure(before, self.fonts.editing());
-        let scroll_px =
-            form::caret_scroll(caret_px, bounds.right - bounds.left, CARET_SCROLL_MARGIN_PX);
-        let slid = D2D_RECT_F {
+        let caret_px = canvas.measure(before, self.fonts.editing);
+        let scroll_px = form::caret_scroll(caret_px, bounds.width(), CARET_SCROLL_MARGIN_PX);
+        // the editing style never wraps or cuts, so only the left edge matters here
+        let slid = Rect {
             left: bounds.left - scroll_px,
-            right: f32::MAX,
             ..bounds
         };
 
-        // SAFETY: the clip is pushed and popped around the draws it applies to.
-        unsafe {
-            self.context
-                .PushAxisAlignedClip(&bounds, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        }
-        self.draw_text(&text, slid, self.fonts.editing(), colour);
-        self.draw_caret(bounds, caret_px - scroll_px);
-        // SAFETY: pairs the push above.
-        unsafe { self.context.PopAxisAlignedClip() };
+        canvas.text(&text, slid, self.fonts.editing, colour, Some(bounds));
+        self.draw_caret(canvas, bounds, caret_px - scroll_px);
     }
 
     /// `offset_px` is where the caret sits from the box's left edge, already scrolled.
-    fn draw_caret(&self, bounds: D2D_RECT_F, offset_px: f32) {
+    fn draw_caret(&self, canvas: &mut Canvas<'_>, bounds: Rect, offset_px: f32) {
         let x = bounds.left + offset_px;
-        let caret = D2D_RECT_F {
+        let caret = Rect {
             left: x,
             top: bounds.top + CARET_INSET_PX,
             right: x + CARET_WIDTH_PX,
             bottom: bounds.bottom - CARET_INSET_PX,
         };
 
-        // SAFETY: the geometry and brush are live for the duration of the call.
-        unsafe {
-            self.context
-                .FillRectangle(&caret, self.brush(&self.palette.accent))
-        };
+        canvas.fill_rect(caret, self.palette.accent, Some(bounds));
     }
 
-    /// Width of `text` in the given format, for placing the caret.
-    fn measure(
-        &self,
-        text: &str,
-        format: &windows::Win32::Graphics::DirectWrite::IDWriteTextFormat,
-    ) -> f32 {
-        if text.is_empty() {
-            return 0.0;
-        }
-        let wide: Vec<u16> = text.encode_utf16().collect();
-
-        // SAFETY: the buffer and format outlive the call; a failure just parks the caret
-        // at the start, which is visibly wrong rather than silently misplaced.
-        let layout = unsafe {
-            self.text_factory
-                .CreateTextLayout(&wide, format, f32::MAX, f32::MAX)
-        };
-        let Ok(layout) = layout else {
-            return 0.0;
-        };
-
-        let mut metrics = windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_METRICS::default();
-
-        // SAFETY: the out-pointer targets a live local.
-        if unsafe { layout.GetMetrics(&raw mut metrics) }.is_err() {
-            return 0.0;
-        }
-        metrics.widthIncludingTrailingWhitespace
-    }
-
-    fn drawable_bounds(&self) -> D2D_RECT_F {
-        drawable_area(self.size_px, self.visible)
-    }
-
-    fn fill_wedges(&self, frame: &Frame<'_>) {
+    fn fill_wedges(&self, canvas: &mut Canvas<'_>, frame: &Frame<'_>) {
         for slot in Slot::all() {
             let Some(wedge) = self.wedges.get(slot) else {
                 continue;
             };
             let highlight = frame.highlights[slot.index()];
-            let fill = blend(&self.palette.wedge, &self.palette.wedge_selected, highlight);
+            let fill = blend(self.palette.wedge, self.palette.wedge_selected, highlight);
 
-            // SAFETY: the geometry and brush are live for the duration of the call.
-            unsafe { self.context.FillGeometry(wedge, self.brush(&fill), None) };
+            canvas.fill_path(wedge, fill);
 
             // a wedge still fading out keeps its outline until it is dark again
             if highlight <= 0.0 && !frame.edit_mode {
                 continue;
             }
 
-            self.outline_wedge(wedge, slot, frame, highlight);
+            self.outline_wedge(canvas, wedge, slot, frame, highlight);
         }
     }
 
@@ -621,7 +483,8 @@ impl Renderer {
     /// it has finished lighting up.
     fn outline_wedge(
         &self,
-        wedge: &ID2D1PathGeometry1,
+        canvas: &mut Canvas<'_>,
+        wedge: &Path,
         slot: Slot,
         frame: &Frame<'_>,
         highlight: f32,
@@ -629,7 +492,7 @@ impl Renderer {
         let dragged = frame.dragging == Some(slot);
         let outline = match dragged {
             true => self.palette.running,
-            false => blend(&self.palette.accent_dim, &self.palette.accent, highlight),
+            false => blend(self.palette.accent_dim, self.palette.accent, highlight),
         };
         let stroke = anim::lerp(
             self.metrics.edit_stroke_px,
@@ -637,135 +500,91 @@ impl Renderer {
             highlight,
         );
 
-        // SAFETY: the geometry and brush are live for the duration of the call.
-        unsafe {
-            self.context
-                .DrawGeometry(wedge, self.brush(&outline), stroke, None)
-        };
+        canvas.stroke_path(wedge, outline, stroke);
     }
 
-    fn draw_dividers(&self, centre: Vector2) {
+    fn draw_dividers(&self, canvas: &mut Canvas<'_>, centre: Point) {
         for slot in Slot::all() {
             let bearing = slot_edge_rad(slot);
             let from = on_circle(centre, self.metrics.hub_radius_px, bearing);
             let to = on_circle(centre, self.metrics.radius_px, bearing);
 
-            // SAFETY: the brush is live for the duration of the call.
-            unsafe {
-                self.context.DrawLine(
-                    from,
-                    to,
-                    self.brush(&self.palette.divider),
-                    self.metrics.divider_stroke_px,
-                    None,
-                )
-            };
+            canvas.line(from, to, self.palette.divider, self.metrics.divider_stroke_px);
         }
     }
 
-    fn draw_slot(&self, centre: Vector2, slot: Slot, frame: &Frame<'_>) {
+    fn draw_slot(&self, canvas: &mut Canvas<'_>, centre: Point, slot: Slot, frame: &Frame<'_>) {
         let view = frame.slots[slot.index()];
         let selected = frame.selected == Some(slot);
         let bearing = slot_bearing_rad(slot);
+        let metrics = self.metrics;
 
-        self.draw_slot_number(centre, slot, bearing, selected);
+        self.draw_slot_number(canvas, centre, slot, bearing, selected);
 
         if let Some(key) = view.icon_key {
-            self.draw_icon(centre, bearing, key);
+            let at = on_circle(centre, metrics.icon_radius_px, bearing);
+            canvas.bitmap(key, box_around(at, metrics.icon_size_px, metrics.icon_size_px));
         }
 
         let label_colour = match (view.filled, selected) {
-            (false, _) => &self.palette.label_empty,
-            (true, true) => &self.palette.label_selected,
-            (true, false) => &self.palette.label,
+            (false, _) => self.palette.label_empty,
+            (true, true) => self.palette.label_selected,
+            (true, false) => self.palette.label,
         };
-        let label_centre = on_circle(centre, self.metrics.label_radius_px, bearing);
-        self.draw_text(
+        let label_centre = on_circle(centre, metrics.label_radius_px, bearing);
+        canvas.text(
             &view.label.to_uppercase(),
-            box_around(
-                label_centre,
-                self.metrics.label_box_px,
-                self.metrics.label_size_px * 3.0,
-            ),
-            self.fonts.label(),
+            box_around(label_centre, metrics.label_box_px, metrics.label_size_px * 3.0),
+            self.fonts.label,
             label_colour,
+            None,
         );
 
-        self.draw_indicators(centre, bearing, label_centre, view);
+        self.draw_indicators(canvas, centre, bearing, label_centre, view);
     }
 
-    fn draw_slot_number(&self, centre: Vector2, slot: Slot, bearing: f32, selected: bool) {
+    fn draw_slot_number(
+        &self,
+        canvas: &mut Canvas<'_>,
+        centre: Point,
+        slot: Slot,
+        bearing: f32,
+        selected: bool,
+    ) {
         let colour = match selected {
-            true => &self.palette.accent,
-            false => &self.palette.number,
+            true => self.palette.accent,
+            false => self.palette.number,
         };
         let at = on_circle(centre, self.metrics.number_radius_px, bearing);
+        let box_px = self.metrics.number_size_px * 2.0;
 
-        self.draw_text(
+        canvas.text(
             &(slot.index() + 1).to_string(),
-            box_around(
-                at,
-                self.metrics.number_size_px * 2.0,
-                self.metrics.number_size_px * 2.0,
-            ),
-            self.fonts.number(),
+            box_around(at, box_px, box_px),
+            self.fonts.number,
             colour,
+            None,
         );
-    }
-
-    fn draw_icon(&self, centre: Vector2, bearing: f32, key: &str) {
-        let at = on_circle(centre, self.metrics.icon_radius_px, bearing);
-        let half = self.metrics.icon_size_px / 2.0;
-        let bounds = D2D_RECT_F {
-            left: at.X - half,
-            top: at.Y - half,
-            right: at.X + half,
-            bottom: at.Y + half,
-        };
-        self.draw_bitmap(key, bounds);
-    }
-
-    /// Draws nothing for an icon that was never uploaded, since a missing icon is not
-    /// worth failing the frame over.
-    fn draw_bitmap(&self, key: &str, bounds: D2D_RECT_F) {
-        let Some(bitmap) = self.icons.get(key) else {
-            return;
-        };
-
-        // SAFETY: the bitmap and bounds are live for the duration of the call.
-        unsafe {
-            self.context.DrawBitmap(
-                bitmap,
-                Some(&bounds),
-                1.0,
-                D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
-                None,
-                None,
-            )
-        };
     }
 
     /// Mirrors the taskbar: a pill under a running app, a longer brighter one when it has
-    /// focus, a second pill for more than one window, and an accent pin for a pinned slot.
+    /// focus, a second pill for more than one window, and an accent mark for the type.
     ///
-    /// The pin sits on the wedge's own bisector between the number and the icon, so it
+    /// The mark sits on the wedge's own bisector between the number and the icon, so it
     /// cannot collide with a neighbour's label however long the names get.
     fn draw_indicators(
         &self,
-        centre: Vector2,
+        canvas: &mut Canvas<'_>,
+        centre: Point,
         bearing: f32,
-        label_centre: Vector2,
+        label_centre: Point,
         view: SlotView<'_>,
     ) {
+        let metrics = self.metrics;
+
         if let Some(glyph) = view.type_glyph {
-            let at = on_circle(centre, self.metrics.pin_radius_px, bearing);
-            let box_px = self.metrics.number_size_px * 2.0;
-            self.draw_text(
-                glyph,
-                box_around(at, box_px, box_px),
-                self.fonts.glyph(),
-                &self.palette.accent,
-            );
+            let at = on_circle(centre, metrics.pin_radius_px, bearing);
+            canvas.glyph(glyph, at, metrics.number_size_px, self.palette.accent);
         }
 
         if !view.running {
@@ -775,231 +594,363 @@ impl Renderer {
         // the focused app gets the longer, brighter pill, as on the taskbar
         let (width, colour) = match view.focused {
             true => (
-                self.metrics.label_box_px * RUNNING_PILL_FOCUSED_RATIO,
-                &self.palette.accent,
+                metrics.label_box_px * RUNNING_PILL_FOCUSED_RATIO,
+                self.palette.accent,
             ),
             false => (
-                self.metrics.label_box_px * RUNNING_PILL_WIDTH_RATIO,
-                &self.palette.running,
+                metrics.label_box_px * RUNNING_PILL_WIDTH_RATIO,
+                self.palette.running,
             ),
         };
-        let top = label_centre.Y + self.metrics.label_size_px + RUNNING_PILL_GAP_PX;
-        self.fill_pill(label_centre.X, top, width, colour);
+        let top = label_centre.y + metrics.label_size_px + RUNNING_PILL_GAP_PX;
+        canvas.fill_rect(pill(label_centre.x, top, width), colour, None);
 
         if view.window_count > 1 {
-            self.fill_pill(
-                label_centre.X,
-                top + RUNNING_PILL_HEIGHT_PX + MULTI_WINDOW_PILL_GAP_PX,
-                self.metrics.label_box_px * RUNNING_PILL_WIDTH_RATIO,
-                colour,
-            );
+            let second_top = top + RUNNING_PILL_HEIGHT_PX + MULTI_WINDOW_PILL_GAP_PX;
+            let second_width = metrics.label_box_px * RUNNING_PILL_WIDTH_RATIO;
+            canvas.fill_rect(pill(label_centre.x, second_top, second_width), colour, None);
         }
     }
 
-    fn fill_pill(&self, centre_x: f32, top: f32, width: f32, colour: &D2D1_COLOR_F) {
-        let bounds = D2D_RECT_F {
-            left: centre_x - width / 2.0,
-            top,
-            right: centre_x + width / 2.0,
-            bottom: top + RUNNING_PILL_HEIGHT_PX,
-        };
+    fn draw_hub(&self, canvas: &mut Canvas<'_>, centre: Point, frame: &Frame<'_>) {
+        let metrics = self.metrics;
+        let palette = &self.palette;
 
-        // SAFETY: the bounds and brush are live for the duration of the call.
-        unsafe { self.context.FillRectangle(&bounds, self.brush(colour)) };
-    }
+        canvas.fill_circle(centre, metrics.hub_radius_px, palette.hub);
+        canvas.stroke_circle(centre, metrics.hub_radius_px, palette.accent, metrics.hub_stroke_px);
 
-    fn draw_hub(&self, centre: Vector2, frame: &Frame<'_>) {
-        self.fill_circle(centre, self.metrics.hub_radius_px, &self.palette.hub);
-        self.stroke_circle(
-            centre,
-            self.metrics.hub_radius_px,
-            &self.palette.accent,
-            self.metrics.hub_stroke_px,
-        );
-
-        let tab_line = match frame.edit_mode {
-            true => theme::EDIT_LABEL,
-            false => frame.hub.tab_line,
-        };
-        let tab_colour = match frame.edit_mode {
-            true => &self.palette.accent,
-            false => &self.palette.number,
+        let (tab_line, tab_colour) = match frame.edit_mode {
+            true => (theme::EDIT_LABEL, palette.accent),
+            false => (frame.hub.tab_line, palette.number),
         };
         self.draw_hub_line(
+            canvas,
             centre,
-            self.metrics.hub_tab_offset_px(),
+            metrics.hub_tab_offset_px(),
             tab_line,
-            self.fonts.hub_tab(),
+            self.fonts.hub_tab,
             tab_colour,
         );
 
         if let Some(clock) = frame.hub.clock {
-            self.draw_hub_line(
-                centre,
-                0.0,
-                clock,
-                self.fonts.hub_clock(),
-                &self.palette.label_selected,
-            );
+            self.draw_hub_line(canvas, centre, 0.0, clock, self.fonts.hub_clock, palette.label_selected);
         }
         if let Some(date) = frame.hub.date {
             self.draw_hub_line(
+                canvas,
                 centre,
-                self.metrics.hub_date_offset_px(),
+                metrics.hub_date_offset_px(),
                 date,
-                self.fonts.hub_date(),
-                &self.palette.number,
+                self.fonts.hub_date,
+                palette.number,
             );
         }
 
-        self.draw_hub_line(
-            centre,
-            self.metrics.cog_offset_px(),
-            theme::COG_GLYPH,
-            self.fonts.cog(),
-            &self.palette.accent_dim,
-        );
+        let cog_at = Point {
+            x: centre.x,
+            y: centre.y + metrics.cog_offset_px(),
+        };
+        canvas.glyph(theme::COG_GLYPH, cog_at, metrics.cog_size_px, palette.accent_dim);
 
-        self.draw_overflow(centre, frame);
+        self.draw_overflow(canvas, centre, frame);
     }
 
     /// The glyph sits by the cog, and the note goes outside the ring, where there is room
     /// for a sentence without crowding the clock.
-    fn draw_overflow(&self, centre: Vector2, frame: &Frame<'_>) {
+    fn draw_overflow(&self, canvas: &mut Canvas<'_>, centre: Point, frame: &Frame<'_>) {
         if frame.overflow == 0 {
             return;
         }
+        let metrics = self.metrics;
 
-        let at = Vector2 {
-            X: centre.X + self.metrics.hub_radius_px * OVERFLOW_X_RATIO,
-            Y: centre.Y + self.metrics.cog_offset_px(),
+        let at = Point {
+            x: centre.x + metrics.hub_radius_px * OVERFLOW_X_RATIO,
+            y: centre.y + metrics.cog_offset_px(),
         };
-        let box_px = self.metrics.cog_size_px * 2.0;
-        self.draw_text(
-            theme::OVERFLOW_GLYPH,
-            box_around(at, box_px, box_px),
-            self.fonts.cog(),
-            &self.palette.accent,
-        );
+        canvas.glyph(theme::OVERFLOW_GLYPH, at, metrics.cog_size_px, self.palette.accent);
 
         let Some(note) = frame.hub.overflow_note else {
             return;
         };
-        let note_at = Vector2 {
-            X: centre.X,
-            Y: centre.Y + self.metrics.radius_px + self.metrics.overflow_note_gap_px(),
+        let note_at = Point {
+            x: centre.x,
+            y: centre.y + metrics.radius_px + metrics.overflow_note_gap_px(),
         };
-        self.draw_text(
+        canvas.text(
             note,
-            box_around(
-                note_at,
-                self.size_px as f32,
-                self.metrics.overflow_note_height_px(),
-            ),
-            self.fonts.hub_date(),
-            &self.palette.accent_dim,
+            box_around(note_at, self.size, metrics.overflow_note_height_px()),
+            self.fonts.hub_date,
+            self.palette.accent_dim,
+            None,
         );
     }
 
     fn draw_hub_line(
         &self,
-        centre: Vector2,
+        canvas: &mut Canvas<'_>,
+        centre: Point,
         offset_y: f32,
         text: &str,
-        format: &windows::Win32::Graphics::DirectWrite::IDWriteTextFormat,
-        colour: &D2D1_COLOR_F,
+        style: Style,
+        colour: Colour,
     ) {
-        let at = Vector2 {
-            X: centre.X,
-            Y: centre.Y + offset_y,
+        let at = Point {
+            x: centre.x,
+            y: centre.y + offset_y,
         };
-        let height = self.metrics.hub_radius_px;
-        self.draw_text(
-            text,
-            box_around(at, self.metrics.hub_radius_px * 2.0, height),
-            format,
-            colour,
-        );
+        let radius = self.metrics.hub_radius_px;
+        canvas.text(text, box_around(at, radius * 2.0, radius), style, colour, None);
     }
+}
 
-    fn draw_text(
-        &self,
-        text: &str,
-        bounds: D2D_RECT_F,
-        format: &windows::Win32::Graphics::DirectWrite::IDWriteTextFormat,
-        colour: &D2D1_COLOR_F,
-    ) {
-        let wide: Vec<u16> = text.encode_utf16().collect();
+/// Window units to buffer pixels: a uniform scale and an offset.
+#[derive(Debug, Clone, Copy)]
+struct View {
+    scale: f32,
+    offset: Point,
+}
 
-        // SAFETY: the buffer, format, bounds and brush all outlive the call.
-        unsafe {
-            self.context.DrawText(
-                &wide,
-                format,
-                &bounds,
-                self.brush(colour),
-                windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_NONE,
-                windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
-            );
+impl View {
+    fn identity(pixel_ratio: f32) -> Self {
+        Self {
+            scale: pixel_ratio,
+            offset: Point::default(),
         }
     }
 
-    fn fill_circle(&self, centre: Vector2, radius_px: f32, colour: &D2D1_COLOR_F) {
-        // SAFETY: the geometry and brush are live for the duration of the call.
-        unsafe {
-            self.context
-                .FillEllipse(&circle(centre, radius_px), self.brush(colour))
-        };
-    }
+    /// The wheel grows into place from slightly small, which points the eye at the centre
+    /// without delaying anything: input is live from the first frame.
+    fn appearing(pixel_ratio: f32, centre: Point, progress: f32) -> Self {
+        let grown = anim::lerp(APPEAR_FROM_SCALE, 1.0, progress);
+        let grown = (grown * APPEAR_SCALE_STEPS).round() / APPEAR_SCALE_STEPS;
 
-    fn stroke_circle(
-        &self,
-        centre: Vector2,
-        radius_px: f32,
-        colour: &D2D1_COLOR_F,
-        stroke_px: f32,
-    ) {
-        // SAFETY: the geometry and brush are live for the duration of the call.
-        unsafe {
-            self.context.DrawEllipse(
-                &circle(centre, radius_px),
-                self.brush(colour),
-                stroke_px,
-                None,
-            )
-        };
-    }
-
-    /// One brush is reused for everything, because creating a COM object per shape would
-    /// allocate on every frame.
-    fn brush(&self, colour: &D2D1_COLOR_F) -> &ID2D1SolidColorBrush {
-        // SAFETY: setting a colour touches no pointer the caller owns.
-        unsafe { self.brush.SetColor(colour) };
-        &self.brush
-    }
-
-    /// Re-acquired every frame rather than cached, so a rotated flip-model buffer can
-    /// never be drawn into by mistake.
-    fn back_buffer(&self) -> Result<ID2D1Image> {
-        // SAFETY: buffer 0 is the only one a flip-model chain exposes.
-        let surface: IDXGISurface = unsafe { self.swap_chain.GetBuffer(0) }?;
-
-        let properties = D2D1_BITMAP_PROPERTIES1 {
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+        Self {
+            scale: pixel_ratio * grown,
+            offset: Point {
+                x: pixel_ratio * centre.x * (1.0 - grown),
+                y: pixel_ratio * centre.y * (1.0 - grown),
             },
-            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-            ..Default::default()
+        }
+    }
+
+    fn transform(self) -> Transform {
+        Transform::from_row(self.scale, 0.0, 0.0, self.scale, self.offset.x, self.offset.y)
+    }
+
+    fn rect(self, rect: Rect) -> Rect {
+        Rect {
+            left: rect.left * self.scale + self.offset.x,
+            top: rect.top * self.scale + self.offset.y,
+            right: rect.right * self.scale + self.offset.x,
+            bottom: rect.bottom * self.scale + self.offset.y,
+        }
+    }
+}
+
+/// One frame's drawing surface, and a record of where it has drawn.
+struct Canvas<'a> {
+    pixmap: &'a mut Pixmap,
+    text: &'a mut TextPainter,
+    glyphs: &'a mut Glyphs,
+    icons: &'a HashMap<String, Pixmap>,
+    view: View,
+    pixel_ratio: f32,
+    /// In buffer pixels.
+    inked: Rect,
+}
+
+impl Canvas<'_> {
+    fn fill_path(&mut self, path: &Path, colour: Colour) {
+        self.pixmap
+            .fill_path(path, &paint(colour), FillRule::Winding, self.view.transform(), None);
+        self.ink(path_bounds(path), 0.0);
+    }
+
+    fn stroke_path(&mut self, path: &Path, colour: Colour, width_px: f32) {
+        let stroke = Stroke {
+            width: width_px,
+            ..Stroke::default()
+        };
+        self.pixmap
+            .stroke_path(path, &paint(colour), &stroke, self.view.transform(), None);
+        self.ink(path_bounds(path), width_px / 2.0);
+    }
+
+    fn fill_circle(&mut self, centre: Point, radius_px: f32, colour: Colour) {
+        if let Some(circle) = PathBuilder::from_circle(centre.x, centre.y, radius_px) {
+            self.fill_path(&circle, colour);
+        }
+    }
+
+    fn stroke_circle(&mut self, centre: Point, radius_px: f32, colour: Colour, width_px: f32) {
+        if let Some(circle) = PathBuilder::from_circle(centre.x, centre.y, radius_px) {
+            self.stroke_path(&circle, colour, width_px);
+        }
+    }
+
+    fn line(&mut self, from: Point, to: Point, colour: Colour, width_px: f32) {
+        let mut builder = PathBuilder::new();
+        builder.move_to(from.x, from.y);
+        builder.line_to(to.x, to.y);
+        if let Some(line) = builder.finish() {
+            self.stroke_path(&line, colour, width_px);
+        }
+    }
+
+    /// `clip` is in window units, like `rect`.
+    fn fill_rect(&mut self, rect: Rect, colour: Colour, clip: Option<Rect>) {
+        let rect = match clip {
+            Some(clip) => rect.intersect(clip),
+            None => rect,
+        };
+        let Some(shape) = tiny_skia::Rect::from_ltrb(rect.left, rect.top, rect.right, rect.bottom)
+        else {
+            return;
+        };
+        self.pixmap
+            .fill_rect(shape, &paint(colour), self.view.transform(), None);
+        self.ink(rect, 0.0);
+    }
+
+    fn text(&mut self, text: &str, bounds: Rect, style: Style, colour: Colour, clip: Option<Rect>) {
+        if text.is_empty() {
+            return;
+        }
+        let inked = self.text.draw(
+            self.pixmap,
+            TextRequest {
+                text,
+                bounds: self.view.rect(bounds),
+                style,
+                scale: self.view.scale,
+                colour,
+                clip: clip.map(|clip| self.view.rect(clip)),
+            },
+        );
+        self.inked = self.inked.union(inked);
+    }
+
+    /// In window units, measured at the size the text is drawn at.
+    fn measure(&mut self, text: &str, style: Style) -> f32 {
+        self.text.measure(text, style, self.view.scale)
+    }
+
+    /// `size` is the glyph's side, in window units, centred on `centre`.
+    fn glyph(&mut self, glyph: Glyph, centre: Point, size: f32, colour: Colour) {
+        let bounds = box_around(centre, size, size);
+        self.glyphs
+            .draw(self.pixmap, glyph, colour, self.view.rect(bounds));
+        self.ink(bounds, 0.0);
+    }
+
+    /// Draws nothing for an icon that was never uploaded, since a missing icon is not
+    /// worth failing the frame over.
+    fn bitmap(&mut self, key: &str, bounds: Rect) {
+        let Some(icon) = self.icons.get(key) else {
+            return;
+        };
+        let target = self.view.rect(bounds);
+        let transform = Transform::from_row(
+            target.width() / icon.width() as f32,
+            0.0,
+            0.0,
+            target.height() / icon.height() as f32,
+            target.left,
+            target.top,
+        );
+        let paint = PixmapPaint {
+            quality: FilterQuality::Bicubic,
+            ..PixmapPaint::default()
         };
 
-        // SAFETY: the surface and properties are live for the duration of the call.
-        let bitmap = unsafe {
-            self.context
-                .CreateBitmapFromDxgiSurface(&surface, Some(&properties))
-        }?;
+        self.pixmap
+            .draw_pixmap(0, 0, icon.as_ref(), &paint, transform, None);
+        self.ink(bounds, 0.0);
+    }
 
-        bitmap.cast()
+    /// Records a shape's window-unit bounds as drawn, `reach` units further out for a
+    /// stroke straddling its outline.
+    fn ink(&mut self, bounds: Rect, reach: f32) {
+        let pixels = self
+            .view
+            .rect(bounds.outset(reach))
+            .outset(ANTIALIAS_REACH_PX);
+        self.inked = self.inked.union(pixels);
+    }
+}
+
+fn path_bounds(path: &Path) -> Rect {
+    let bounds = path.bounds();
+    Rect {
+        left: bounds.left(),
+        top: bounds.top(),
+        right: bounds.right(),
+        bottom: bounds.bottom(),
+    }
+}
+
+fn paint(colour: Colour) -> Paint<'static> {
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Paint::default()
+    };
+    let clamp = |channel: f32| channel.clamp(0.0, 1.0);
+    let colour = Color::from_rgba(clamp(colour.r), clamp(colour.g), clamp(colour.b), clamp(colour.a))
+        .unwrap_or(Color::TRANSPARENT);
+    paint.set_color(colour);
+    paint
+}
+
+fn clear(pixmap: &mut Pixmap, region: Option<Region>) {
+    const BYTES_PER_PIXEL: usize = 4;
+
+    let Some(region) = region else {
+        pixmap.fill(Color::TRANSPARENT);
+        return;
+    };
+    let stride = pixmap.width() as usize * BYTES_PER_PIXEL;
+    let start_x = region.x as usize * BYTES_PER_PIXEL;
+    let row_bytes = region.width as usize * BYTES_PER_PIXEL;
+    let data = pixmap.data_mut();
+    for row in region.y..region.y + region.height {
+        let start = row as usize * stride + start_x;
+        data[start..start + row_bytes].fill(0);
+    }
+}
+
+/// Rounded outward to whole pixels and kept inside the buffer.
+fn region_of(inked: Rect, pixmap: &Pixmap) -> Region {
+    let left = inked.left.floor().max(0.0) as u32;
+    let top = inked.top.floor().max(0.0) as u32;
+    let right = (inked.right.ceil().max(0.0) as u32).min(pixmap.width());
+    let bottom = (inked.bottom.ceil().max(0.0) as u32).min(pixmap.height());
+
+    Region {
+        x: left.min(right),
+        y: top.min(bottom),
+        width: right.saturating_sub(left),
+        height: bottom.saturating_sub(top),
+    }
+}
+
+fn buffer_side(size: f32, pixel_ratio: f32) -> (u32, u32) {
+    let side = (size * pixel_ratio).ceil().max(1.0) as u32;
+    (side, side)
+}
+
+fn buffer_for(size: f32, pixel_ratio: f32) -> Result<Pixmap> {
+    let (width, height) = buffer_side(size, pixel_ratio);
+    Pixmap::new(width, height).with_context(|| {
+        format!("could not allocate a {width}x{height} drawing buffer for the wheel")
+    })
+}
+
+fn pill(centre_x: f32, top: f32, width: f32) -> Rect {
+    Rect {
+        left: centre_x - width / 2.0,
+        top,
+        right: centre_x + width / 2.0,
+        bottom: top + RUNNING_PILL_HEIGHT_PX,
     }
 }
 
@@ -1009,25 +960,19 @@ impl Renderer {
 /// The window is sized for the furthest a petal can reach, so on a monitor shorter than
 /// that it hangs off the top and bottom. Clamping to the window alone let a north or
 /// south petal open off screen.
-fn drawable_area(size_px: u32, visible: Option<D2D_RECT_F>) -> D2D_RECT_F {
-    let side = size_px as f32;
-    let window = D2D_RECT_F {
+fn drawable_area(size: f32, visible: Option<Rect>) -> Rect {
+    let window = Rect {
         left: 0.0,
         top: 0.0,
-        right: side,
-        bottom: side,
+        right: size,
+        bottom: size,
     };
     let on_screen = match visible {
-        Some(visible) => D2D_RECT_F {
-            left: window.left.max(visible.left),
-            top: window.top.max(visible.top),
-            right: window.right.min(visible.right),
-            bottom: window.bottom.min(visible.bottom),
-        },
+        Some(visible) => window.intersect(visible),
         None => window,
     };
 
-    D2D_RECT_F {
+    Rect {
         left: on_screen.left + FORM_EDGE_MARGIN_PX,
         top: on_screen.top + FORM_EDGE_MARGIN_PX,
         right: on_screen.right - FORM_EDGE_MARGIN_PX,
@@ -1035,20 +980,14 @@ fn drawable_area(size_px: u32, visible: Option<D2D_RECT_F>) -> D2D_RECT_F {
     }
 }
 
-fn centre_of(size_px: u32) -> Vector2 {
-    let half = size_px as f32 / 2.0;
-    Vector2 { X: half, Y: half }
+fn centre_of(size: f32) -> Point {
+    let half = size / 2.0;
+    Point { x: half, y: half }
 }
 
-/// Right and bottom edges are exclusive, so neighbouring rows cannot both claim a click.
-fn contains(rect: &D2D_RECT_F, point: Vector2) -> bool {
-    point.X >= rect.left && point.X < rect.right && point.Y >= rect.top && point.Y < rect.bottom
-}
-
-/// Mixes two palette colours. Drawing twice with alpha would be the other way round, but
-/// the renderer shares one brush, so a mixed colour is the honest option.
-fn blend(from: &D2D1_COLOR_F, to: &D2D1_COLOR_F, factor: f32) -> D2D1_COLOR_F {
-    D2D1_COLOR_F {
+/// Mixes two palette colours, so a wedge can fade rather than switch.
+fn blend(from: Colour, to: Colour, factor: f32) -> Colour {
+    Colour {
         r: anim::lerp(from.r, to.r, factor),
         g: anim::lerp(from.g, to.g, factor),
         b: anim::lerp(from.b, to.b, factor),
@@ -1056,70 +995,12 @@ fn blend(from: &D2D1_COLOR_F, to: &D2D1_COLOR_F, factor: f32) -> D2D1_COLOR_F {
     }
 }
 
-fn circle(centre: Vector2, radius_px: f32) -> D2D1_ELLIPSE {
-    D2D1_ELLIPSE {
-        point: centre,
-        radiusX: radius_px,
-        radiusY: radius_px,
-    }
-}
-
-fn box_around(centre: Vector2, width_px: f32, height_px: f32) -> D2D_RECT_F {
-    D2D_RECT_F {
-        left: centre.X - width_px / 2.0,
-        top: centre.Y - height_px / 2.0,
-        right: centre.X + width_px / 2.0,
-        bottom: centre.Y + height_px / 2.0,
-    }
-}
-
-fn create_d3d_device() -> Result<ID3D11Device> {
-    let mut device = None;
-
-    // SAFETY: the out-pointer targets a live local, and BGRA support is what Direct2D
-    // needs from the device.
-    unsafe {
-        D3D11CreateDevice(
-            None,
-            D3D_DRIVER_TYPE_HARDWARE,
-            HMODULE::default(),
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            None,
-            D3D11_SDK_VERSION,
-            Some(&raw mut device),
-            None,
-            None,
-        )
-    }?;
-
-    device.ok_or_else(windows::core::Error::from_thread)
-}
-
-fn create_swap_chain(
-    d3d_device: &ID3D11Device,
-    dxgi_device: &IDXGIDevice,
-    size_px: u32,
-) -> Result<IDXGISwapChain1> {
-    let description = DXGI_SWAP_CHAIN_DESC1 {
-        Width: size_px,
-        Height: size_px,
-        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-        SampleDesc: NO_MULTISAMPLING,
-        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-        BufferCount: BUFFER_COUNT,
-        // composition swap chains accept only these two, and premultiplied alpha is what
-        // gives the overlay per-pixel transparency
-        Scaling: DXGI_SCALING_STRETCH,
-        SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-        AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
-        ..Default::default()
-    };
-
-    // SAFETY: every argument is live for the duration of the calls.
-    unsafe {
-        let adapter = dxgi_device.GetAdapter()?;
-        let factory: IDXGIFactory2 = adapter.GetParent()?;
-        factory.CreateSwapChainForComposition(d3d_device, &description, None)
+fn box_around(centre: Point, width_px: f32, height_px: f32) -> Rect {
+    Rect {
+        left: centre.x - width_px / 2.0,
+        top: centre.y - height_px / 2.0,
+        right: centre.x + width_px / 2.0,
+        bottom: centre.y + height_px / 2.0,
     }
 }
 
@@ -1129,7 +1010,7 @@ mod tests {
 
     #[test]
     fn before_the_window_is_placed_the_whole_window_is_usable() {
-        let area = drawable_area(1000, None);
+        let area = drawable_area(1000.0, None);
 
         assert_eq!(area.left, FORM_EDGE_MARGIN_PX);
         assert_eq!(area.bottom, 1000.0 - FORM_EDGE_MARGIN_PX);
@@ -1139,14 +1020,14 @@ mod tests {
     /// middle to a petal.
     #[test]
     fn a_window_hanging_off_the_screen_lends_only_its_visible_part() {
-        let visible = D2D_RECT_F {
+        let visible = Rect {
             left: -200.0,
             top: 245.0,
             right: 1800.0,
             bottom: 1385.0,
         };
 
-        let area = drawable_area(1690, Some(visible));
+        let area = drawable_area(1690.0, Some(visible));
 
         assert_eq!(area.top, 245.0 + FORM_EDGE_MARGIN_PX);
         assert_eq!(area.bottom, 1385.0 - FORM_EDGE_MARGIN_PX);
@@ -1159,24 +1040,20 @@ mod tests {
     /// stays on screen.
     #[test]
     fn every_petal_stays_on_a_short_screen() {
-        let size_px = 1690;
-        let visible = D2D_RECT_F {
+        let size = 1690.0;
+        let visible = Rect {
             left: -115.0,
             top: 245.0,
             right: 1805.0,
             bottom: 1385.0,
         };
-        let area = drawable_area(size_px, Some(visible));
-        let centre = centre_of(size_px);
+        let area = drawable_area(size, Some(visible));
+        let centre = centre_of(size);
 
         for slot in Slot::all() {
             for rows in [3, 8, 12] {
                 let petal = Petal::new(centre, 387.5, slot_bearing_rad(slot), rows, 1.0, area);
-                assert!(
-                    petal.panel.top >= visible.top,
-                    "slot {} rows {rows}",
-                    slot.index()
-                );
+                assert!(petal.panel.top >= visible.top, "slot {} rows {rows}", slot.index());
                 assert!(
                     petal.panel.bottom <= visible.bottom,
                     "slot {} rows {rows}",
@@ -1184,5 +1061,94 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_inked_region_is_kept_inside_the_buffer() {
+        let pixmap = Pixmap::new(100, 100).expect("a small pixmap");
+        let inked = Rect {
+            left: -10.5,
+            top: 20.2,
+            right: 150.0,
+            bottom: 40.7,
+        };
+
+        assert_eq!(
+            region_of(inked, &pixmap),
+            Region {
+                x: 0,
+                y: 20,
+                width: 100,
+                height: 21
+            }
+        );
+    }
+
+    /// Draws a busy frame and writes it next to the build, for eyeballing the renderer and
+    /// timing it. Ignored by default because it loads every system font.
+    #[test]
+    #[ignore = "writes target/wheel-snapshot.png; run with --ignored"]
+    fn snapshot_a_busy_frame() {
+        const FRAMES: u32 = 30;
+        let accent = kile_wheel_core::config::Rgb {
+            red: 0xD8,
+            green: 0xB3,
+            blue: 0x6A,
+        };
+        let metrics = Metrics::new(1.25, 1.0);
+        let size = metrics.window_size_px() as f32;
+        let mut renderer =
+            Renderer::new(size, 1.0, metrics, Palette::new(accent, 1.0)).expect("renderer");
+
+        let labels = ["Code", "Firefox", "Files", "", "Terminal", "Jira", "Notes", ""];
+        let slots = std::array::from_fn(|index| SlotView {
+            label: labels[index],
+            type_glyph: (!labels[index].is_empty()).then(|| theme::TYPE_GLYPHS[index % 7]),
+            running: index % 2 == 0,
+            focused: index == 0,
+            window_count: index % 3,
+            filled: !labels[index].is_empty(),
+            ..SlotView::default()
+        });
+        let mut highlights = [0.0; Slot::COUNT];
+        highlights[1] = 1.0;
+        let frame = Frame {
+            slots,
+            selected: Slot::new(1),
+            highlights,
+            appear: 1.0,
+            hub: HubView {
+                tab_line: "1  MAIN",
+                clock: Some("12:34"),
+                date: Some("Sun 08 Nov"),
+                overflow_note: Some("2 apps have nowhere to land."),
+            },
+            edit_mode: false,
+            dragging: None,
+            overflow: 2,
+            form: None,
+        };
+
+        let started = std::time::Instant::now();
+        for _ in 0..FRAMES {
+            renderer.draw(&frame);
+        }
+        let per_frame = started.elapsed() / FRAMES;
+        let drawn = renderer.draw(&frame);
+        println!("{per_frame:?} per frame, region {:?}", drawn.region);
+
+        let png = drawn.pixmap.encode_png().expect("encodes");
+        std::fs::write(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/wheel-snapshot.png"),
+            png,
+        )
+        .expect("writes");
+    }
+
+    #[test]
+    fn nothing_inked_is_an_empty_region() {
+        let pixmap = Pixmap::new(10, 10).expect("a small pixmap");
+
+        assert_eq!(region_of(Rect::default(), &pixmap).width, 0);
     }
 }
